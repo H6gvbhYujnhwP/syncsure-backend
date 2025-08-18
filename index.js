@@ -18,7 +18,7 @@ app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 // Heartbeat
 app.post('/api/heartbeat', async (req, res) => {
   try {
-    const licKey = (req.header('x-license-key') || '').trim();
+    const licKey = (req.header('x-license-key') || '').trim().toUpperCase();
     if (!licKey) return res.status(401).json({ error: 'Missing license key' });
 
     // 1. Find license
@@ -28,10 +28,22 @@ app.post('/api/heartbeat', async (req, res) => {
       .eq('key', licKey)
       .single();
 
-    if (licErr || !lic) return res.status(401).json({ error: 'Invalid license' });
-    if ((lic.status || 'active') !== 'active') {
-      return res.status(403).json({ error: `License ${lic.status}` });
-    }
+    const { data: lic, error: licErr } = await supabase
+  .from('licenses')
+  .select('id, status, max_devices')
+  .eq('key', licKey)
+  .maybeSingle();
+
+if (licErr) {
+  return res.status(500).json({ error: licErr.message });
+}
+if (!lic) {
+  return res.status(401).json({ error: 'License not found' });
+}
+if ((lic.status || 'active') !== 'active') {
+  return res.status(403).json({ error: `License ${lic.status}` });
+}
+
 
     const { device_hash, error_detail } = req.body || {};
     if (!device_hash) return res.status(400).json({ error: 'Missing device_hash' });
@@ -76,3 +88,4 @@ app.post('/api/heartbeat', async (req, res) => {
 // Start server
 const port = process.env.PORT || 10000;
 app.listen(port, () => console.log(`SyncSure backend listening on port ${port}`));
+
