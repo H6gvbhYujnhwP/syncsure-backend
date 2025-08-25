@@ -1,14 +1,19 @@
 {
   "name": "syncsure-backend",
-  "private": true,
+  "version": "1.0.0",
   "type": "module",
-  "scripts": { "start": "node index.js" },
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
-    "express": "^4.19.2",
+    "body-parser": "^1.20.2",
     "cors": "^2.8.5",
-    "basic-auth": "^2.0.1",
-    "@supabase/supabase-js": "^2.47.0",
-    "stripe": "^16.0.0",
-    "body-parser": "^1.20.2"
+    "express": "^4.19.2",
+    "pg": "^8.11.5"
   }
 }
