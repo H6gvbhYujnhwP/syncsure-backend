@@ -1,88 +1,79 @@
-// index.js
 import express from 'express';
+import bodyParser from 'body-parser';
 import cors from 'cors';
-import { createClient } from '@supabase/supabase-js';
+import { pool } from './db.js';
 
 const app = express();
-app.use(cors());
-app.use(express.json()); // parse JSON bodies
 
-// --- Supabase (use SERVICE ROLE in SUPABASE_KEY) ---
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY,
-  { auth: { persistSession: false } }
-);
+// Parse JSON
+app.use(bodyParser.json({ limit: '256kb' }));
 
-// --- Health check ---
+// CORS: allow your Windows agent to call the API
+app.use('/api/heartbeat', cors({
+  origin: (o, cb) => cb(null, true),              // reflect any origin (desktop agent)
+  methods: ['POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type','X-Requested-With','User-Agent','Origin'],
+  credentials: false
+}));
+app.options('/api/heartbeat', cors());            // preflight (harmless even if not used)
+
+// Health
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
-// --- Heartbeat: header x-license-key; body { device_hash, error_detail, report? } ---
+// Heartbeat (camelCase body)
 app.post('/api/heartbeat', async (req, res) => {
+  const client = await pool.connect();
   try {
-    // 0) Read + normalize key
-    const licKey = (req.header('x-license-key') || '').trim().toUpperCase();
-    if (!licKey) return res.status(401).json({ error: 'Missing license key' });
+    const { licenseKey, deviceHash, status, eventType, message, errorDetail } = req.body || {};
+    if (!licenseKey || !deviceHash) return res.status(400).json({ error: 'Missing licenseKey/deviceHash' });
 
-    // 1) Find license
-    const q1 = supabase
-      .from('licenses')
-      .select('id, status, max_devices')
-      .eq('key', licKey)
-      .maybeSingle();
-    const { data: lic, error: licErr } = await q1;
-    if (licErr) { console.error('LicErr:', licErr); return res.status(500).json({ step: 'license lookup', error: licErr.message }); }
-    if (!lic)   { console.error('Lic not found for', licKey); return res.status(401).json({ error: 'License not found' }); }
-    if ((lic.status || 'active') !== 'active') return res.status(403).json({ error: `License ${lic.status}` });
+    // 1) License
+    const lic = await client.query(
+      `select id, status, max_devices from licenses where key=$1 limit 1`,
+      [licenseKey]
+    );
+    if (lic.rows.length === 0) return res.status(401).json({ error: 'License not found' });
+    const L = lic.rows[0];
+    if ((L.status || 'active') !== 'active') return res.status(403).json({ error: `License ${L.status}` });
 
-    // 2) Validate body
-    const { device_hash, error_detail } = req.body || {};
-    if (!device_hash) return res.status(400).json({ error: 'Missing device_hash' });
-
-    // 3) Already bound?
-    const q2 = supabase
-      .from('license_bindings')
-      .select('device_hash')
-      .eq('license_id', lic.id)
-      .eq('device_hash', device_hash)
-      .maybeSingle();
-    const { data: bound, error: boundErr } = await q2;
-    if (boundErr) { console.error('BoundErr:', boundErr); return res.status(500).json({ step: 'binding select', error: boundErr.message }); }
-
-    // 4) If not bound, enforce seats and bind
-    if (!bound) {
-      const q3 = supabase
-        .from('license_bindings')
-        .select('*', { count: 'exact', head: true })
-        .eq('license_id', lic.id);
-      const { count, error: countErr } = await q3;
-      if (countErr) { console.error('CountErr:', countErr); return res.status(500).json({ step: 'binding count', error: countErr.message }); }
-
-      if ((count || 0) >= (lic.max_devices || 1)) {
+    // 2) Bind device (enforce seats)
+    const bound = await client.query(
+      `select 1 from license_bindings where license_id=$1 and device_hash=$2 limit 1`,
+      [L.id, deviceHash]
+    );
+    if (bound.rows.length === 0) {
+      const cnt = await client.query(
+        `select count(*)::int as c from license_bindings where license_id=$1`,
+        [L.id]
+      );
+      if (cnt.rows[0].c >= (L.max_devices || 1)) {
+        // Optional: also insert alert row here
         return res.status(403).json({ error: 'Seat limit reached' });
       }
-
-      const q4 = supabase
-        .from('license_bindings')
-        .insert([{ license_id: lic.id, device_hash }]);
-      const { error: bindErr } = await q4;
-      if (bindErr) { console.error('BindErr:', bindErr); return res.status(500).json({ step: 'binding insert', error: bindErr.message }); }
+      await client.query(
+        `insert into license_bindings(license_id, device_hash)
+         values($1,$2)
+         on conflict (license_id, device_hash) do nothing`,
+        [L.id, deviceHash]
+      );
     }
 
-    // 5) Record heartbeat
-    const q5 = supabase
-      .from('heartbeats')
-      .insert([{ license_id: lic.id, device_hash, error_detail: error_detail ?? null }]);
-    const { error: hbErr } = await q5;
-    if (hbErr) { console.error('HbErr:', hbErr); return res.status(500).json({ step: 'heartbeat insert', error: hbErr.message }); }
+    // 3) Insert heartbeat
+    await client.query(
+      `insert into heartbeats(license_id, device_hash, status, event_type, message, error_detail)
+       values($1,$2,$3,$4,$5,$6)`,
+      [L.id, deviceHash, status || 'ok', eventType || 'process_running', message || null, errorDetail ?? null]
+    );
 
-    return res.json({ ok: true });
+    res.json({ ok: true });
   } catch (e) {
-    console.error('Unhandled error:', e);
-    return res.status(500).json({ error: 'Server error', detail: e?.message });
+    console.error(e);
+    res.status(500).json({ error: e.message || 'server error' });
+  } finally {
+    client.release();
   }
 });
 
-// --- Start server (Render sets PORT) ---
-const port = process.env.PORT || 10000;
+// Start
+const port = process.env.PORT || 10000; // Render sets PORT automatically
 app.listen(port, () => console.log(`SyncSure backend listening on port ${port}`));
