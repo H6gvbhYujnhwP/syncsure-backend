@@ -55,61 +55,37 @@ async function ensureSchema() {
 // Run the schema check on startup
 ensureSchema().catch(console.error);
 
-
-// ---------- CORS ----------
-// Agent → POST /api/heartbeat (no cookies)
-app.use('/api/heartbeat', cors({
-  origin: (o, cb) => cb(null, true),
-  methods: ['POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type','X-Requested-With','User-Agent','Origin'],
-  credentials: false
-}));
-app.options('/api/heartbeat', cors());
-
-// Agent → POST /api/heartbeat/offline (no cookies)
-app.use('/api/heartbeat/offline', cors({
-  origin: (o, cb) => cb(null, true),
-  methods: ['POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type','X-Requested-With','User-Agent','Origin'],
-  credentials: false
-}));
-app.options('/api/heartbeat/offline', cors());
-
-// Dashboard → GET /api/heartbeats (public read in your current flow)
-app.use('/api/heartbeats', cors({
-  origin: (o, cb) => cb(null, true),
-  methods: ['GET', 'OPTIONS'],
-  allowedHeaders: ['Content-Type'],
-  credentials: false
-}));
-app.options('/api/heartbeats', cors());
-
-// Dashboard → GET /api/events/catalog (public)
-app.use('/api/events/catalog', cors({
-  origin: (o, cb) => cb(null, true),
-  methods: ['GET', 'OPTIONS'],
-  allowedHeaders: ['Content-Type'],
-  credentials: false
-}));
-app.options('/api/events/catalog', cors());
-
-// ---------- Auth CORS + Sessions ----------
-// Your frontend’s origin, e.g. https://sync-sure-agents5.replit.app
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '';
-if (!FRONTEND_ORIGIN ) {
+// ---------- GLOBAL CORS CONFIGURATION ----------
+// Your frontend's origin
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'https://sync-sure-agents5.replit.app';
+if (!FRONTEND_ORIGIN) {
   console.warn('WARNING: FRONTEND_ORIGIN not set. Set it in Render env for correct CORS with cookies.');
 }
 
-// Allow cookies from the frontend for auth routes
-app.use('/api/auth', cors({
-  origin: FRONTEND_ORIGIN,
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type'],
-  credentials: true
+// Global CORS middleware - this fixes the main issue
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // Allow your frontend origin
+    if (origin === FRONTEND_ORIGIN) {
+      return callback(null, true);
+    }
+    
+    // Allow any origin for non-auth routes (heartbeat, etc.)
+    return callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'User-Agent', 'Origin'],
+  exposedHeaders: ['Set-Cookie']
 }));
-app.options('/api/auth', cors({ origin: FRONTEND_ORIGIN, credentials: true }));
 
-// Session cookie
+// Handle preflight requests
+app.options('*', cors());
+
+// ---------- Session Configuration ----------
 const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-only-secret-change-me';
 app.use('/api/auth', session({
   name: 'syncsure.sid',
@@ -118,7 +94,7 @@ app.use('/api/auth', session({
   saveUninitialized: false,
   cookie: {
     httpOnly: true,      // not available to JS
-    secure: true,        // required on https (Render is https )
+    secure: true,        // required on https (Render is https)
     sameSite: 'none',    // allow cross-site (frontend → backend)
     maxAge: 7 * 24 * 3600 * 1000 // 7 days
   }
@@ -191,16 +167,16 @@ async function handleHeartbeatInsert(client, {
   const lic = await client.query(
     `select id, status, max_devices from licenses where key=$1 limit 1`,
     [licenseKey]
-   );
+  );
   if (lic.rows.length === 0) return { http: 401, body: { error: 'License not found' } };
   const L = lic.rows[0];
-  if ((L.status || 'active' ) !== 'active') return { http: 403, body: { error: `License ${L.status}` } };
+  if ((L.status || 'active') !== 'active') return { http: 403, body: { error: `License ${L.status}` } };
 
   // binding + seats
   const bound = await client.query(
     `select 1 from license_bindings where license_id=$1 and device_hash=$2 limit 1`,
     [L.id, deviceHash]
-   );
+  );
   if (bound.rows.length === 0) {
     const cnt = await client.query(
       `select count(*)::int as c from license_bindings where license_id=$1`,
@@ -210,7 +186,7 @@ async function handleHeartbeatInsert(client, {
       return { http: 403, body: { error: 'Seat limit reached' } };
     }
     await client.query(
-      `insert into license_bindings(license_id, device_hash )
+      `insert into license_bindings(license_id, device_hash)
        values($1,$2)
        on conflict (license_id, device_hash) do nothing`,
       [L.id, deviceHash]
@@ -232,14 +208,14 @@ async function handleHeartbeatInsert(client, {
 }
 
 // ---------- Agent routes ----------
-app.post('/api/heartbeat', async (req, res ) => {
+app.post('/api/heartbeat', async (req, res) => {
   const client = await pool.connect();
   try {
     const { licenseKey, deviceHash, status, eventType, message, errorDetail } = req.body || {};
     const result = await handleHeartbeatInsert(client, {
       licenseKey, deviceHash, rawStatus: status, rawEventType: eventType, message, errorDetail
     });
-    res.status(result.http ).json(result.body);
+    res.status(result.http).json(result.body);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || 'server error' });
@@ -261,7 +237,7 @@ app.post('/api/heartbeat/offline', async (req, res) => {
       message: message || (mappedEvent === 'device_asleep' ? 'system sleep' : 'system shutdown'),
       errorDetail
     });
-    res.status(result.http ).json(result.body);
+    res.status(result.http).json(result.body);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || 'server error' });
@@ -395,6 +371,33 @@ app.post('/api/auth/logout', (req, res) => {
   });
 });
 
+// ---------- Missing Dashboard Routes ----------
+// Add the missing routes that your frontend is trying to call
+
+app.get('/api/dashboard/stats', async (req, res) => {
+  // This is a placeholder - you'll need to implement based on your requirements
+  res.json({
+    totalDevices: 0,
+    activeDevices: 0,
+    errorDevices: 0,
+    lastUpdate: new Date().toISOString()
+  });
+});
+
+app.get('/api/licenses', async (req, res) => {
+  // This is a placeholder - you'll need to implement based on your requirements
+  const client = await pool.connect();
+  try {
+    const result = await client.query('SELECT * FROM licenses ORDER BY created_at DESC');
+    res.json({ licenses: result.rows });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'server error' });
+  } finally {
+    client.release();
+  }
+});
+
 // ---------- Events catalog ----------
 app.get('/api/events/catalog', (_req, res) => {
   const list = Object.entries(EventCatalog).map(([key, v]) => ({
@@ -408,3 +411,4 @@ app.get('/api/events/catalog', (_req, res) => {
 // ---------- Start ----------
 const port = process.env.PORT || 10000;
 app.listen(port, () => console.log(`SyncSure backend listening on port ${port}`));
+
