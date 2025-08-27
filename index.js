@@ -371,17 +371,86 @@ app.post('/api/auth/logout', (req, res) => {
   });
 });
 
-// ---------- Missing Dashboard Routes ----------
-// Add the missing routes that your frontend is trying to call
-
+// ---------- Dashboard Stats Route (FIXED) ----------
 app.get('/api/dashboard/stats', async (req, res) => {
-  // This is a placeholder - you'll need to implement based on your requirements
-  res.json({
-    totalDevices: 0,
-    activeDevices: 0,
-    errorDevices: 0,
-    lastUpdate: new Date().toISOString()
-  });
+  const client = await pool.connect();
+  try {
+    // Get the latest status for each device across all licenses
+    const candidates = ['created_at', 'created_ts', 'inserted_at', 'timestamp', 'ts'];
+    const colCheck = await client.query(
+      `select column_name
+       from information_schema.columns
+       where table_schema='public' and table_name='heartbeats'
+         and column_name = any($1)`,
+      [candidates]
+    );
+
+    let statsQuery;
+    if (colCheck.rows.length === 0) {
+      // No timestamp column found, use id ordering
+      statsQuery = `
+        with latest_heartbeats as (
+          select distinct on (device_hash) 
+            device_hash, status, id
+          from heartbeats
+          order by device_hash, id desc
+        )
+        select 
+          count(*) as total_devices,
+          count(*) filter (where status = 'ok') as healthy_devices,
+          count(*) filter (where status = 'warn') as warning_devices,
+          count(*) filter (where status = 'error') as error_devices,
+          count(*) filter (where status = 'asleep') as asleep_devices
+        from latest_heartbeats
+      `;
+    } else {
+      // Use timestamp column
+      const tsCol = colCheck.rows[0].column_name;
+      statsQuery = `
+        with latest_heartbeats as (
+          select distinct on (device_hash) 
+            device_hash, status, ${tsCol}
+          from heartbeats
+          order by device_hash, ${tsCol} desc
+        )
+        select 
+          count(*) as total_devices,
+          count(*) filter (where status = 'ok') as healthy_devices,
+          count(*) filter (where status = 'warn') as warning_devices,
+          count(*) filter (where status = 'error') as error_devices,
+          count(*) filter (where status = 'asleep') as asleep_devices
+        from latest_heartbeats
+      `;
+    }
+
+    const result = await client.query(statsQuery);
+    const stats = result.rows[0];
+
+    // Convert string counts to integers
+    const totalDevices = parseInt(stats.total_devices) || 0;
+    const healthyDevices = parseInt(stats.healthy_devices) || 0;
+    const warningDevices = parseInt(stats.warning_devices) || 0;
+    const errorDevices = parseInt(stats.error_devices) || 0;
+    const asleepDevices = parseInt(stats.asleep_devices) || 0;
+
+    // Calculate active devices (healthy + warning, excluding error and asleep)
+    const activeDevices = healthyDevices + warningDevices;
+
+    res.json({
+      totalDevices,
+      activeDevices,
+      healthyDevices,
+      warningDevices,
+      errorDevices,
+      asleepDevices,
+      lastUpdate: new Date().toISOString()
+    });
+  } catch (e) {
+    console.error('Error in dashboard stats:', e);
+    res.status(500).json({ error: 'server error' });
+  } finally {
+    client.release();
+  }
 });
 
 app.get('/api/licenses', async (req, res) => {
