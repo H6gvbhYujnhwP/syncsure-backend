@@ -19,10 +19,12 @@ const app = express();
 app.set('trust proxy', 1); // needed for secure cookies on Render behind proxy
 app.use(bodyParser.json({ limit: '256kb' }));
 
-// ---------- Ensure users table exists and is correct ----------
+// ---------- Ensure all tables exist and are correct ----------
 async function ensureSchema() {
   const client = await pool.connect();
   try {
+    console.log('🔧 Setting up database schema...');
+    
     // Create the users table if it doesn't exist
     await client.query(`
       create table if not exists users (
@@ -39,14 +41,80 @@ async function ensureSchema() {
     `);
     if (res.rowCount === 0) {
       console.log('Adding missing "pw_hash" column to "users" table...');
-      // We add a default value temporarily because the column is NOT NULL
       await client.query(`
         alter table users add column pw_hash text not null default 'migration_placeholder';
       `);
       console.log('Column "pw_hash" added.');
     }
+
+    // Create licenses table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS licenses (
+        id BIGSERIAL PRIMARY KEY,
+        key VARCHAR(255) NOT NULL UNIQUE,
+        status VARCHAR(50) NOT NULL DEFAULT 'active',
+        max_devices INTEGER NOT NULL DEFAULT 5,
+        customer_email VARCHAR(255),
+        stripe_customer_id VARCHAR(255),
+        stripe_subscription_id VARCHAR(255),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NULL,
+        CONSTRAINT licenses_status_check CHECK (status IN ('active', 'suspended', 'cancelled', 'expired')),
+        CONSTRAINT licenses_max_devices_check CHECK (max_devices > 0)
+      );
+    `);
+
+    // Create license_bindings table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS license_bindings (
+        id BIGSERIAL PRIMARY KEY,
+        license_id BIGINT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+        device_hash VARCHAR(255) NOT NULL,
+        bound_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT unique_license_device UNIQUE (license_id, device_hash)
+      );
+    `);
+
+    // Create heartbeats table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS heartbeats (
+        id BIGSERIAL PRIMARY KEY,
+        license_id BIGINT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+        device_hash VARCHAR(255) NOT NULL,
+        status VARCHAR(50) NOT NULL,
+        event_type VARCHAR(100) NOT NULL,
+        message TEXT,
+        error_detail TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT heartbeats_status_check CHECK (status IN ('ok', 'warn', 'error', 'asleep'))
+      );
+    `);
+
+    // Create indexes
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_licenses_key ON licenses(key);
+      CREATE INDEX IF NOT EXISTS idx_license_bindings_license_id ON license_bindings(license_id);
+      CREATE INDEX IF NOT EXISTS idx_license_bindings_device_hash ON license_bindings(device_hash);
+      CREATE INDEX IF NOT EXISTS idx_heartbeats_license_id ON heartbeats(license_id);
+      CREATE INDEX IF NOT EXISTS idx_heartbeats_device_hash ON heartbeats(device_hash);
+      CREATE INDEX IF NOT EXISTS idx_heartbeats_created_at ON heartbeats(created_at);
+    `);
+
+    // Insert test licenses
+    await client.query(`
+      INSERT INTO licenses (key, customer_email, max_devices, status) VALUES
+        ('SYNC-TEST-123', 'test@example.com', 10, 'active'),
+        ('SYNC-DEMO-456', 'demo@example.com', 5, 'active'),
+        ('SYNC-PROD-789', 'customer@example.com', 25, 'active')
+      ON CONFLICT (key) DO NOTHING;
+    `);
+
+    console.log('✅ Database schema setup complete!');
+    
   } catch (err) {
-    console.error('Error during schema setup:', err);
+    console.error('❌ Error during schema setup:', err);
   } finally {
     client.release();
   }
@@ -446,38 +514,15 @@ app.get('/api/dashboard/stats', async (req, res) => {
       lastUpdate: new Date().toISOString()
     });
   } catch (e) {
-    console.error('Error in dashboard stats:', e);
-    res.status(500).json({ error: 'server error' });
-  } finally {
-    client.release();
-  }
-});
-
-app.get('/api/licenses', async (req, res) => {
-  // This is a placeholder - you'll need to implement based on your requirements
-  const client = await pool.connect();
-  try {
-    const result = await client.query('SELECT * FROM licenses ORDER BY created_at DESC');
-    res.json({ licenses: result.rows });
-  } catch (e) {
     console.error(e);
-    res.status(500).json({ error: 'server error' });
+    res.status(500).json({ error: e.message || 'server error' });
   } finally {
     client.release();
   }
 });
 
-// ---------- Events catalog ----------
-app.get('/api/events/catalog', (_req, res) => {
-  const list = Object.entries(EventCatalog).map(([key, v]) => ({
-    eventType: v.eventType,
-    status: v.status,
-    description: v.description
-  }));
-  res.json({ events: list });
+// ---------- Start server ----------
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 SyncSure backend running on port ${PORT}`);
 });
-
-// ---------- Start ----------
-const port = process.env.PORT || 10000;
-app.listen(port, () => console.log(`SyncSure backend listening on port ${port}`));
-
