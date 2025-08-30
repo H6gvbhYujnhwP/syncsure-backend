@@ -47,23 +47,37 @@ async function ensureSchema() {
       console.log('Column "pw_hash" added.');
     }
 
-    // Create licenses table
+    // Create licenses table with basic structure first
     await client.query(`
       CREATE TABLE IF NOT EXISTS licenses (
         id BIGSERIAL PRIMARY KEY,
         key VARCHAR(255) NOT NULL UNIQUE,
         status VARCHAR(50) NOT NULL DEFAULT 'active',
         max_devices INTEGER NOT NULL DEFAULT 5,
-        customer_email VARCHAR(255),
-        stripe_customer_id VARCHAR(255),
-        stripe_subscription_id VARCHAR(255),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        expires_at TIMESTAMPTZ NULL,
-        CONSTRAINT licenses_status_check CHECK (status IN ('active', 'suspended', 'cancelled', 'expired')),
-        CONSTRAINT licenses_max_devices_check CHECK (max_devices > 0)
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
+
+    // Add missing columns to licenses table if they don't exist
+    const licenseColumns = [
+      { name: 'customer_email', type: 'VARCHAR(255)' },
+      { name: 'stripe_customer_id', type: 'VARCHAR(255)' },
+      { name: 'stripe_subscription_id', type: 'VARCHAR(255)' },
+      { name: 'updated_at', type: 'TIMESTAMPTZ NOT NULL DEFAULT NOW()' },
+      { name: 'expires_at', type: 'TIMESTAMPTZ NULL' }
+    ];
+
+    for (const col of licenseColumns) {
+      const colExists = await client.query(`
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name='licenses' AND column_name=$1
+      `, [col.name]);
+      
+      if (colExists.rowCount === 0) {
+        console.log(`Adding missing "${col.name}" column to licenses table...`);
+        await client.query(`ALTER TABLE licenses ADD COLUMN ${col.name} ${col.type};`);
+      }
+    }
 
     // Create license_bindings table
     await client.query(`
@@ -102,14 +116,28 @@ async function ensureSchema() {
       CREATE INDEX IF NOT EXISTS idx_heartbeats_created_at ON heartbeats(created_at);
     `);
 
-    // Insert test licenses
+    // Insert test licenses (only basic columns)
     await client.query(`
-      INSERT INTO licenses (key, customer_email, max_devices, status) VALUES
-        ('SYNC-TEST-123', 'test@example.com', 10, 'active'),
-        ('SYNC-DEMO-456', 'demo@example.com', 5, 'active'),
-        ('SYNC-PROD-789', 'customer@example.com', 25, 'active')
+      INSERT INTO licenses (key, status, max_devices) VALUES
+        ('SYNC-TEST-123', 'active', 10),
+        ('SYNC-DEMO-456', 'active', 5),
+        ('SYNC-PROD-789', 'active', 25)
       ON CONFLICT (key) DO NOTHING;
     `);
+
+    // Update customer_email for test licenses if column exists
+    const emailColExists = await client.query(`
+      SELECT 1 FROM information_schema.columns 
+      WHERE table_name='licenses' AND column_name='customer_email'
+    `);
+    
+    if (emailColExists.rowCount > 0) {
+      await client.query(`
+        UPDATE licenses SET customer_email = 'test@example.com' WHERE key = 'SYNC-TEST-123' AND customer_email IS NULL;
+        UPDATE licenses SET customer_email = 'demo@example.com' WHERE key = 'SYNC-DEMO-456' AND customer_email IS NULL;
+        UPDATE licenses SET customer_email = 'customer@example.com' WHERE key = 'SYNC-PROD-789' AND customer_email IS NULL;
+      `);
+    }
 
     console.log('✅ Database schema setup complete!');
     
@@ -526,3 +554,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 SyncSure backend running on port ${PORT}`);
 });
+
