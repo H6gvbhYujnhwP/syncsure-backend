@@ -334,11 +334,15 @@ await client.query(`CREATE INDEX IF NOT EXISTS idx_heartbeats_device_hash ON hea
 await client.query(`CREATE INDEX IF NOT EXISTS idx_heartbeats_created_at ON heartbeats(created_at);`);
 await client.query(`CREATE INDEX IF NOT EXISTS idx_device_management_log_license_id ON device_management_log(license_id);`);
 
-// Create indexes for new columns only if they exist
-const lastSeenExists = await client.query(\`
+const lastSeenExists = await client.query(`
   SELECT 1 FROM information_schema.columns 
   WHERE table_name='license_bindings' AND column_name='last_seen'
-\`);
+`);
+if (lastSeenExists.rowCount > 0) {
+  await client.query(`CREATE INDEX IF NOT EXISTS idx_license_bindings_last_seen ON license_bindings(last_seen);`);
+  await client.query(`CREATE INDEX IF NOT EXISTS idx_license_bindings_status ON license_bindings(status);`);
+}
+
 if (lastSeenExists.rowCount > 0) {
   await client.query(\`CREATE INDEX IF NOT EXISTS idx_license_bindings_last_seen ON license_bindings(last_seen);\`);
   await client.query(\`CREATE INDEX IF NOT EXISTS idx_license_bindings_status ON license_bindings(status);\`);
@@ -982,4 +986,5 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`📧 Email notifications: ${resend ? 'Enabled' : 'Disabled (set RESEND_API_KEY)'}`);
   console.log(`⏰ Device management scheduled: Daily at 2 AM and every 6 hours`);
 });
+
 
