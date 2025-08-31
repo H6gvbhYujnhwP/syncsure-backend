@@ -1,4 +1,4 @@
-// index.js - Complete SyncSure Backend with Device Management
+// index.js - Complete SyncSure Backend with Device Management (UUID Compatible)
 import express from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
@@ -11,7 +11,7 @@ import { Resend } from 'resend';
 const { Pool } = pkg;
 
 // ---------- Configuration ----------
-const resend = new Resend(process.env.RESEND_API_KEY);
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@syncsure.com';
 const FROM_EMAIL = process.env.FROM_EMAIL || 'SyncSure <noreply@syncsure.com>';
 
@@ -30,7 +30,7 @@ app.use(bodyParser.json({ limit: '256kb' }));
 
 // Send email notification using Resend
 async function sendDeviceNotification(email, subject, htmlContent) {
-  if (!process.env.RESEND_API_KEY) {
+  if (!resend) {
     console.log(`📧 Email notification skipped (no RESEND_API_KEY): ${subject}`);
     return false;
   }
@@ -207,7 +207,7 @@ async function updateDeviceLastSeen(client, licenseId, deviceHash) {
   `, [licenseId, deviceHash]);
 }
 
-// ---------- Enhanced Schema with Device Management ----------
+// ---------- Enhanced Schema with Device Management (UUID Compatible) ----------
 async function ensureSchema() {
   const client = await pool.connect();
   try {
@@ -224,10 +224,10 @@ async function ensureSchema() {
       );
     `);
 
-    // Create licenses table with enhanced structure
+    // Create licenses table with UUID (matching existing structure)
     await client.query(`
       CREATE TABLE IF NOT EXISTS licenses (
-        id BIGSERIAL PRIMARY KEY,
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         key VARCHAR(255) NOT NULL UNIQUE,
         status VARCHAR(50) NOT NULL DEFAULT 'active',
         max_devices INTEGER NOT NULL DEFAULT 5,
@@ -260,11 +260,11 @@ async function ensureSchema() {
       }
     }
 
-    // Create enhanced license_bindings table with device management
+    // Create enhanced license_bindings table with device management (UUID compatible)
     await client.query(`
       CREATE TABLE IF NOT EXISTS license_bindings (
         id BIGSERIAL PRIMARY KEY,
-        license_id BIGINT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+        license_id UUID NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
         device_hash VARCHAR(255) NOT NULL,
         device_name VARCHAR(255),
         bound_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -298,11 +298,11 @@ async function ensureSchema() {
       }
     }
 
-    // Create heartbeats table
+    // Create heartbeats table (UUID compatible)
     await client.query(`
       CREATE TABLE IF NOT EXISTS heartbeats (
         id BIGSERIAL PRIMARY KEY,
-        license_id BIGINT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+        license_id UUID NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
         device_hash VARCHAR(255) NOT NULL,
         status VARCHAR(50) NOT NULL,
         event_type VARCHAR(100) NOT NULL,
@@ -313,11 +313,11 @@ async function ensureSchema() {
       );
     `);
 
-    // Create device management log table
+    // Create device management log table (UUID compatible)
     await client.query(`
       CREATE TABLE IF NOT EXISTS device_management_log (
         id BIGSERIAL PRIMARY KEY,
-        license_id BIGINT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+        license_id UUID NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
         device_hash VARCHAR(255) NOT NULL,
         action VARCHAR(100) NOT NULL,
         details TEXT,
@@ -972,6 +972,6 @@ app.use((err, req, res, next) => {
 const PORT = parseInt(process.env.PORT || '5000', 10);
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 SyncSure Backend with Device Management running on port ${PORT}`);
-  console.log(`📧 Email notifications: ${process.env.RESEND_API_KEY ? 'Enabled' : 'Disabled (set RESEND_API_KEY)'}`);
+  console.log(`📧 Email notifications: ${resend ? 'Enabled' : 'Disabled (set RESEND_API_KEY)'}`);
   console.log(`⏰ Device management scheduled: Daily at 2 AM and every 6 hours`);
 });
