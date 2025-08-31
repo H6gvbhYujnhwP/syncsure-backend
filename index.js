@@ -1,230 +1,77 @@
-// index.js - Complete SyncSure Backend with Device Management + Migration Endpoint
 import express from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
 import session from 'express-session';
 import bcrypt from 'bcrypt';
-import pkg from 'pg';
+import pg from 'pg';
 import cron from 'node-cron';
 import { Resend } from 'resend';
 
-const { Pool } = pkg;
+const { Pool } = pg;
 
-// ---------- Configuration ----------
+// Initialize Resend (safely handle missing API key)
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@syncsure.com';
-const FROM_EMAIL = process.env.FROM_EMAIL || 'SyncSure <noreply@syncsure.com>';
 
-// ---------- DB connection ----------
-export const pool = new Pool({
+const app = express();
+const port = process.env.PORT || 10000;
+
+// Database connection
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.PGSSLMODE === 'require' ? { rejectUnauthorized: false } : false
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// ---------- App ----------
-const app = express();
-app.set('trust proxy', 1); // needed for secure cookies on Render behind proxy
-app.use(bodyParser.json({ limit: '256kb' }));
+// Middleware
+app.use(bodyParser.json());
+app.use(cors({
+  origin: process.env.FRONTEND_ORIGIN || true,
+  credentials: true
+}));
 
-// ---------- Device Management Functions ----------
-
-// Send email notification using Resend
-async function sendDeviceNotification(email, subject, htmlContent) {
-  if (!resend) {
-    console.log(`📧 Email notification skipped (no RESEND_API_KEY): ${subject}`);
-    return false;
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'your-secret-key',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { 
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 24 * 60 * 60 * 1000 // 24 hours
   }
+}));
 
-  try {
-    const { data, error } = await resend.emails.send({
-      from: FROM_EMAIL,
-      to: [email],
-      subject: subject,
-      html: htmlContent
-    });
+console.log('🚀 SyncSure Backend with Device Management running on port', port);
+console.log('📧 Email notifications:', resend ? 'Enabled' : 'Disabled');
+console.log('⏰ Device management scheduled: Daily at 2 AM and every 6 hours');
 
-    if (error) {
-      console.error('📧 Email send error:', error);
-      return false;
-    }
-
-    console.log(`📧 Email sent successfully to ${email}: ${subject}`);
-    return true;
-  } catch (error) {
-    console.error('📧 Email send exception:', error);
-    return false;
-  }
-}
-
-// Check for devices that need grace period or cleanup
-async function processDeviceManagement() {
-  const client = await pool.connect();
-  try {
-    console.log('🔍 Running device management check...');
-
-    // Find devices offline for 7+ days (grace period start)
-    const gracePeriodDevices = await client.query(`
-      SELECT lb.*, l.customer_email, l.notification_email, l.email_notifications, l.key as license_key
-      FROM license_bindings lb
-      JOIN licenses l ON lb.license_id = l.id
-      WHERE lb.status = 'active'
-        AND lb.last_seen < NOW() - INTERVAL '7 days'
-        AND lb.grace_period_start IS NULL
-        AND l.status = 'active'
-    `);
-
-    // Start grace period for offline devices
-    for (const device of gracePeriodDevices.rows) {
-      await client.query(`
-        UPDATE license_bindings 
-        SET grace_period_start = NOW(), status = 'grace_period'
-        WHERE id = $1
-      `, [device.id]);
-
-      // Log the action
-      await client.query(`
-        INSERT INTO device_management_log (license_id, device_hash, action, details)
-        VALUES ($1, $2, 'grace_period_started', 'Device offline for 7+ days, starting grace period')
-      `, [device.license_id, device.device_hash]);
-
-      // Send notification email
-      if (device.email_notifications && device.notification_email) {
-        const deviceName = device.device_name || device.device_hash;
-        const subject = `SyncSure Alert: Device "${deviceName}" Offline`;
-        const htmlContent = `
-          <h2>Device Offline Alert</h2>
-          <p>Your SyncSure device has been offline for 7 days:</p>
-          <ul>
-            <li><strong>Device:</strong> ${deviceName}</li>
-            <li><strong>License:</strong> ${device.license_key}</li>
-            <li><strong>Last Seen:</strong> ${new Date(device.last_seen).toLocaleString()}</li>
-          </ul>
-          <p><strong>Grace Period:</strong> Your device will be automatically removed in 23 days if it doesn't come back online.</p>
-          <p>If you've moved this device or no longer need it, you can manually remove it from your dashboard.</p>
-          <hr>
-          <p><small>SyncSure Device Management</small></p>
-        `;
-        
-        await sendDeviceNotification(device.notification_email, subject, htmlContent);
-      }
-
-      console.log(`📱 Started grace period for device: ${device.device_hash}`);
-    }
-
-    // Find devices ready for cleanup (30+ days offline)
-    const cleanupDevices = await client.query(`
-      SELECT lb.*, l.customer_email, l.notification_email, l.email_notifications, l.key as license_key
-      FROM license_bindings lb
-      JOIN licenses l ON lb.license_id = l.id
-      WHERE lb.status IN ('grace_period', 'active')
-        AND lb.last_seen < NOW() - INTERVAL '30 days'
-        AND l.status = 'active'
-    `);
-
-    // Cleanup old devices
-    for (const device of cleanupDevices.rows) {
-      // Send final notification before cleanup
-      if (device.email_notifications && device.notification_email && !device.cleanup_notification_sent) {
-        const deviceName = device.device_name || device.device_hash;
-        const subject = `SyncSure: Device "${deviceName}" Removed`;
-        const htmlContent = `
-          <h2>Device Automatically Removed</h2>
-          <p>Your SyncSure device has been automatically removed due to being offline for 30+ days:</p>
-          <ul>
-            <li><strong>Device:</strong> ${deviceName}</li>
-            <li><strong>License:</strong> ${device.license_key}</li>
-            <li><strong>Last Seen:</strong> ${new Date(device.last_seen).toLocaleString()}</li>
-          </ul>
-          <p><strong>License Seat Freed:</strong> This device seat is now available for a new device.</p>
-          <p>If you need to reinstall SyncSure on this device, simply run the agent again with your license key.</p>
-          <hr>
-          <p><small>SyncSure Device Management</small></p>
-        `;
-        
-        await sendDeviceNotification(device.notification_email, subject, htmlContent);
-        
-        // Mark notification as sent
-        await client.query(`
-          UPDATE license_bindings 
-          SET cleanup_notification_sent = true
-          WHERE id = $1
-        `, [device.id]);
-      }
-
-      // Remove the device
-      await client.query(`
-        UPDATE license_bindings 
-        SET status = 'removed'
-        WHERE id = $1
-      `, [device.id]);
-
-      // Log the action
-      await client.query(`
-        INSERT INTO device_management_log (license_id, device_hash, action, details)
-        VALUES ($1, $2, 'auto_cleanup', 'Device automatically removed after 30 days offline')
-      `, [device.license_id, device.device_hash]);
-
-      console.log(`🗑️ Auto-removed device: ${device.device_hash}`);
-    }
-
-    // Send weekly summary to admin
-    if (gracePeriodDevices.rows.length > 0 || cleanupDevices.rows.length > 0) {
-      const subject = `SyncSure Device Management Summary`;
-      const htmlContent = `
-        <h2>Device Management Summary</h2>
-        <p><strong>Grace Period Started:</strong> ${gracePeriodDevices.rows.length} devices</p>
-        <p><strong>Devices Cleaned Up:</strong> ${cleanupDevices.rows.length} devices</p>
-        <hr>
-        <p><small>SyncSure Automated Device Management</small></p>
-      `;
-      
-      await sendDeviceNotification(ADMIN_EMAIL, subject, htmlContent);
-    }
-
-    console.log(`✅ Device management complete: ${gracePeriodDevices.rows.length} grace period, ${cleanupDevices.rows.length} cleanup`);
-
-  } catch (error) {
-    console.error('❌ Device management error:', error);
-  } finally {
-    client.release();
-  }
-}
-
-// ---------- Trigger for updating last_seen ----------
-async function updateDeviceLastSeen(client, licenseId, deviceHash) {
-  await client.query(`
-    UPDATE license_bindings 
-    SET last_seen = NOW(), 
-        status = CASE 
-          WHEN status IN ('grace_period', 'removed') THEN 'active'
-          ELSE status 
-        END,
-        grace_period_start = CASE 
-          WHEN status = 'grace_period' THEN NULL
-          ELSE grace_period_start 
-        END
-    WHERE license_id = $1 AND device_hash = $2
-  `, [licenseId, deviceHash]);
-}
-
-// ---------- Enhanced Schema with Device Management (UUID Compatible) ----------
+// ---------- Enhanced Database Schema Setup with Safe ID Addition ----------
 async function ensureSchema() {
   const client = await pool.connect();
   try {
     console.log('🔧 Setting up enhanced database schema...');
     
-    // Create the users table if it doesn't exist - matching existing structure
+    // Create the users table if it doesn't exist
     await client.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id          BIGSERIAL PRIMARY KEY,
-        email       TEXT NOT NULL UNIQUE,
-        password    TEXT NOT NULL,
-        name        TEXT,
-        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      create table if not exists users (
+        id          bigserial primary key,
+        email       text not null unique,
+        password    text not null,
+        created_at  timestamptz not null default now()
       );
     `);
 
-    // Create licenses table with UUID (matching existing structure)
+    // Check for the pw_hash column and add it if it's missing
+    const res = await client.query(`
+      select 1 from information_schema.columns
+      where table_name='users' and column_name='pw_hash'
+    `);
+    if (res.rowCount === 0) {
+      console.log('Adding missing "pw_hash" column to "users" table...');
+      await client.query(`
+        alter table users add column pw_hash text not null default 'migration_placeholder';
+      `);
+      console.log('Column "pw_hash" added.');
+    }
+
+    // Create licenses table with UUID support
     await client.query(`
       CREATE TABLE IF NOT EXISTS licenses (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -237,48 +84,58 @@ async function ensureSchema() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         expires_at TIMESTAMPTZ NULL,
-        notification_email VARCHAR(255),
-        email_notifications BOOLEAN DEFAULT true
+        CONSTRAINT licenses_status_check CHECK (status IN ('active', 'suspended', 'cancelled', 'expired')),
+        CONSTRAINT licenses_max_devices_check CHECK (max_devices > 0)
       );
     `);
 
-    // Add missing columns to licenses table if they don't exist
-    const licenseColumns = [
-      { name: 'notification_email', type: 'VARCHAR(255)' },
-      { name: 'email_notifications', type: 'BOOLEAN DEFAULT true' }
-    ];
-
-    for (const col of licenseColumns) {
-      const colExists = await client.query(`
-        SELECT 1 FROM information_schema.columns 
-        WHERE table_name='licenses' AND column_name=$1
-      `, [col.name]);
-      
-      if (colExists.rowCount === 0) {
-        console.log(`Adding missing "${col.name}" column to licenses table...`);
-        await client.query(`ALTER TABLE licenses ADD COLUMN ${col.name} ${col.type};`);
-      }
-    }
-
-    // Create enhanced license_bindings table with device management (UUID compatible)
+    // Create license_bindings table with safe ID addition
     await client.query(`
       CREATE TABLE IF NOT EXISTS license_bindings (
-        id BIGSERIAL PRIMARY KEY,
         license_id UUID NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
         device_hash VARCHAR(255) NOT NULL,
-        device_name VARCHAR(255),
         bound_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        status VARCHAR(50) NOT NULL DEFAULT 'active',
+        device_name VARCHAR(255),
+        status VARCHAR(50) DEFAULT 'active',
         grace_period_start TIMESTAMPTZ NULL,
         offline_notification_sent BOOLEAN DEFAULT false,
         cleanup_notification_sent BOOLEAN DEFAULT false,
-        CONSTRAINT unique_license_device UNIQUE (license_id, device_hash)
+        CONSTRAINT unique_license_device UNIQUE (license_id, device_hash),
+        CONSTRAINT license_bindings_status_check CHECK (status IN ('active', 'grace_period', 'removed'))
       );
     `);
 
+    // Safely add ID column to license_bindings if it doesn't exist
+    const idColumnExists = await client.query(`
+      SELECT 1 FROM information_schema.columns 
+      WHERE table_name='license_bindings' AND column_name='id'
+    `);
+    
+    if (idColumnExists.rowCount === 0) {
+      console.log('🔧 Adding ID column to license_bindings table for better performance...');
+      
+      // Add ID column
+      await client.query('ALTER TABLE license_bindings ADD COLUMN id BIGSERIAL;');
+      
+      // Check if there's already a primary key
+      const pkExists = await client.query(`
+        SELECT 1 FROM information_schema.table_constraints 
+        WHERE table_name='license_bindings' AND constraint_type='PRIMARY KEY'
+      `);
+      
+      if (pkExists.rowCount === 0) {
+        // Add primary key constraint
+        await client.query('ALTER TABLE license_bindings ADD CONSTRAINT license_bindings_pkey PRIMARY KEY (id);');
+        console.log('✅ ID column and primary key added successfully');
+      } else {
+        console.log('✅ ID column added (primary key already exists)');
+      }
+    }
+
     // Add missing columns to license_bindings if they don't exist
-    const bindingColumns = [
+    const columnsToAdd = [
+      { name: 'last_seen', type: 'TIMESTAMPTZ DEFAULT NOW()' },
       { name: 'device_name', type: 'VARCHAR(255)' },
       { name: 'status', type: 'VARCHAR(50) DEFAULT \'active\'' },
       { name: 'grace_period_start', type: 'TIMESTAMPTZ NULL' },
@@ -286,19 +143,19 @@ async function ensureSchema() {
       { name: 'cleanup_notification_sent', type: 'BOOLEAN DEFAULT false' }
     ];
 
-    for (const col of bindingColumns) {
-      const colExists = await client.query(`
+    for (const column of columnsToAdd) {
+      const columnExists = await client.query(`
         SELECT 1 FROM information_schema.columns 
-        WHERE table_name='license_bindings' AND column_name=$1
-      `, [col.name]);
+        WHERE table_name='license_bindings' AND column_name='${column.name}'
+      `);
       
-      if (colExists.rowCount === 0) {
-        console.log(`Adding missing "${col.name}" column to license_bindings table...`);
-        await client.query(`ALTER TABLE license_bindings ADD COLUMN ${col.name} ${col.type};`);
+      if (columnExists.rowCount === 0) {
+        await client.query(`ALTER TABLE license_bindings ADD COLUMN ${column.name} ${column.type};`);
+        console.log(`✅ Added column: ${column.name}`);
       }
     }
 
-    // Create heartbeats table (UUID compatible)
+    // Create heartbeats table
     await client.query(`
       CREATE TABLE IF NOT EXISTS heartbeats (
         id BIGSERIAL PRIMARY KEY,
@@ -307,13 +164,13 @@ async function ensureSchema() {
         status VARCHAR(50) NOT NULL,
         event_type VARCHAR(100) NOT NULL,
         message TEXT,
-        error_detail TEXT,
+        raw_data JSONB,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         CONSTRAINT heartbeats_status_check CHECK (status IN ('ok', 'warn', 'error', 'asleep'))
       );
     `);
 
-    // Create device management log table (UUID compatible)
+    // Create device management log table
     await client.query(`
       CREATE TABLE IF NOT EXISTS device_management_log (
         id BIGSERIAL PRIMARY KEY,
@@ -325,7 +182,12 @@ async function ensureSchema() {
       );
     `);
 
-    // Create basic indexes first
+    // Update existing records with default values
+    await client.query('UPDATE license_bindings SET last_seen = NOW() WHERE last_seen IS NULL;');
+    await client.query('UPDATE license_bindings SET device_name = device_hash WHERE device_name IS NULL;');
+    await client.query('UPDATE license_bindings SET status = \'active\' WHERE status IS NULL;');
+
+    // Create performance indexes
     await client.query('CREATE INDEX IF NOT EXISTS idx_licenses_key ON licenses(key);');
     await client.query('CREATE INDEX IF NOT EXISTS idx_license_bindings_license_id ON license_bindings(license_id);');
     await client.query('CREATE INDEX IF NOT EXISTS idx_license_bindings_device_hash ON license_bindings(device_hash);');
@@ -344,24 +206,27 @@ async function ensureSchema() {
       await client.query('CREATE INDEX IF NOT EXISTS idx_license_bindings_status ON license_bindings(status);');
     }
 
-    // Insert test data
+    // Insert test licenses
     await client.query(`
-      INSERT INTO licenses (key, status, max_devices, customer_email, notification_email) VALUES
-        ('SYNC-TEST-123', 'active', 10, 'test@syncsure.com', 'test@syncsure.com'),
-        ('SYNC-DEMO-456', 'active', 5, 'demo@syncsure.com', 'demo@syncsure.com'),
-        ('SYNC-PROD-789', 'active', 25, 'customer@syncsure.com', 'customer@syncsure.com')
-      ON CONFLICT (key) DO NOTHING;
+      INSERT INTO licenses (key, status, max_devices, customer_email) VALUES 
+        ('SYNC-TEST-123', 'active', 10, 'test@example.com'),
+        ('SYNC-DEMO-456', 'active', 5, 'demo@example.com'),
+        ('SYNC-PROD-789', 'active', 25, 'customer@example.com')
+      ON CONFLICT (key) DO UPDATE SET
+        status = EXCLUDED.status,
+        max_devices = EXCLUDED.max_devices,
+        customer_email = COALESCE(licenses.customer_email, EXCLUDED.customer_email);
     `);
 
-    // Create test user account
-    const testUserExists = await client.query('SELECT id FROM users WHERE email = $1', ['test@syncsure.com']);
-    if (testUserExists.rows.length === 0) {
+    // Create test user if it doesn't exist
+    const testUserExists = await client.query('SELECT id FROM users WHERE email = $1', ['test@example.com']);
+    if (testUserExists.rowCount === 0) {
       const hashedPassword = await bcrypt.hash('password123', 10);
       await client.query(
-        'INSERT INTO users (email, password, name) VALUES ($1, $2, $3)',
-        ['test@syncsure.com', hashedPassword, 'Test User']
+        'INSERT INTO users (email, password, pw_hash) VALUES ($1, $2, $3)',
+        ['test@example.com', 'password123', hashedPassword]
       );
-      console.log('✅ Created test user: test@syncsure.com / password123');
+      console.log('✅ Test user created: test@example.com / password123');
     }
 
     console.log('✅ Enhanced database schema setup complete!');
@@ -373,608 +238,544 @@ async function ensureSchema() {
   }
 }
 
-// Run the schema check on startup
-ensureSchema().catch(console.error);
+// Initialize database schema on startup
+ensureSchema();
 
-// Schedule device management to run daily at 2 AM
-cron.schedule('0 2 * * *', () => {
-  console.log('⏰ Running scheduled device management...');
-  processDeviceManagement();
-});
-
-// Also run device management every 6 hours for more frequent checks
-cron.schedule('0 */6 * * *', () => {
-  console.log('⏰ Running periodic device management check...');
-  processDeviceManagement();
-});
-
-// ---------- GLOBAL CORS CONFIGURATION ----------
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'https://sync-sure-agents5.replit.app';
-
-app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    // Allow your frontend origin
-    if (origin === FRONTEND_ORIGIN) {
-      return callback(null, true);
-    }
-    
-    // Allow Replit domains
-    if (origin.endsWith('.replit.app') || origin.endsWith('.replit.dev')) {
-      return callback(null, true);
-    }
-    
-    // Allow any origin for non-auth routes (heartbeat, etc.)
-    return callback(null, true);
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'User-Agent', 'Origin', 'Accept'],
-  exposedHeaders: ['Set-Cookie']
-}));
-
-// Handle preflight requests
-app.options('*', cors());
-
-// ---------- Session Configuration ----------
-const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-only-secret-change-me';
-app.use(session({
-  name: 'syncsure.sid',
-  secret: SESSION_SECRET,
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    httpOnly: true,      // not available to JS
-    secure: process.env.NODE_ENV === 'production', // secure in production
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // cross-site in production
-    maxAge: 7 * 24 * 3600 * 1000 // 7 days
-  }
-}));
-
-// ---------- Health ----------
-app.get('/health', (_req, res) => res.json({ status: 'ok' }));
-
-// ---------- Event Catalog + Normalization ----------
-const EventCatalog = {
-  // Critical Failures → error
-  process_missing:    { status: 'error',  eventType: 'sync_error',        description: 'OneDrive process not running' },
-  auth_error:         { status: 'error',  eventType: 'sync_error',        description: 'Authentication / login errors' },
-  sync_blocked:       { status: 'error',  eventType: 'sync_paused',       description: 'Sync blocked (paused/denied)' },
-  connectivity_fail:  { status: 'error',  eventType: 'sync_error',        description: 'Connectivity failure to OneDrive endpoints' },
-  file_errors_high:   { status: 'error',  eventType: 'sync_error',        description: 'Large number of file errors' },
-  disk_full:          { status: 'error',  eventType: 'sync_error',        description: 'Disk full / quota exceeded' },
-
-  // Warnings → warn
-  pending_long:       { status: 'warn',   eventType: 'sync_status_check', description: 'Sync stuck / long pending' },
-  partial_errors:     { status: 'warn',   eventType: 'sync_status_check', description: 'A few file sync errors (1–5)' },
-  network_hiccup:     { status: 'warn',   eventType: 'sync_status_check', description: 'Temporary network hiccup' },
-  heartbeat_unknown:  { status: 'warn',   eventType: 'sync_status_check', description: 'Tool heartbeat seen, but unknown state' },
-  auth_warning:       { status: 'warn',   eventType: 'sync_status_check', description: 'Authentication warnings detected' },
-
-  // Healthy → ok
-  process_running:    { status: 'ok',     eventType: 'sync_status_check', description: 'OneDrive process is running' },
-  healthy:            { status: 'ok',     eventType: 'sync_status_check', description: 'Everything looks good' },
-
-  // Device state → asleep
-  device_asleep:      { status: 'asleep', eventType: 'sync_status_check', description: 'Agent reports system sleep' },
-  device_shutdown:    { status: 'asleep', eventType: 'sync_status_check', description: 'Agent reports shutdown' },
+// ---------- Event Normalization ----------
+const eventCatalog = {
+  // Sync Status Events
+  'sync_status_check': { status: 'ok', eventType: 'sync_status_check' },
+  'sync_healthy': { status: 'ok', eventType: 'sync_status_check' },
+  'sync_running': { status: 'ok', eventType: 'sync_status_check' },
+  'sync_up_to_date': { status: 'ok', eventType: 'sync_status_check' },
+  
+  // Pause Events
+  'sync_paused': { status: 'warn', eventType: 'sync_paused' },
+  'sync_stopped': { status: 'warn', eventType: 'sync_paused' },
+  'pause_detected': { status: 'warn', eventType: 'sync_paused' },
+  'onedrive_paused': { status: 'warn', eventType: 'sync_paused' },
+  
+  // Error Events
+  'sync_error': { status: 'error', eventType: 'sync_error' },
+  'sync_failed': { status: 'error', eventType: 'sync_error' },
+  'auth_error': { status: 'error', eventType: 'sync_error' },
+  'storage_error': { status: 'error', eventType: 'sync_error' },
+  'connectivity_error': { status: 'error', eventType: 'sync_error' },
+  'process_error': { status: 'error', eventType: 'sync_error' },
+  
+  // Process Events
+  'process_running': { status: 'ok', eventType: 'sync_status_check' },
+  'process_healthy': { status: 'ok', eventType: 'sync_status_check' },
+  'process_warning': { status: 'warn', eventType: 'sync_status_check' },
+  'process_critical': { status: 'error', eventType: 'sync_error' },
+  
+  // Authentication Events
+  'auth_ok': { status: 'ok', eventType: 'sync_status_check' },
+  'auth_warning': { status: 'warn', eventType: 'sync_status_check' },
+  'auth_critical': { status: 'error', eventType: 'sync_error' },
+  
+  // Storage Events
+  'storage_ok': { status: 'ok', eventType: 'sync_status_check' },
+  'storage_warning': { status: 'warn', eventType: 'sync_status_check' },
+  'storage_critical': { status: 'error', eventType: 'sync_error' },
+  
+  // Performance Events
+  'performance_ok': { status: 'ok', eventType: 'sync_status_check' },
+  'performance_warning': { status: 'warn', eventType: 'sync_status_check' },
+  'performance_critical': { status: 'error', eventType: 'sync_error' },
+  
+  // Connectivity Events
+  'connectivity_ok': { status: 'ok', eventType: 'sync_status_check' },
+  'connectivity_warning': { status: 'warn', eventType: 'sync_status_check' },
+  'connectivity_critical': { status: 'error', eventType: 'sync_error' },
+  
+  // Power/System Events
+  'device_asleep': { status: 'ok', eventType: 'sync_status_check' },
+  'device_offline': { status: 'ok', eventType: 'sync_status_check' },
+  'device_shutdown': { status: 'ok', eventType: 'sync_status_check' },
+  'device_hibernating': { status: 'ok', eventType: 'sync_status_check' }
 };
 
-function normalizeEvent(inputStatus, inputEventType) {
-  const key = String((inputEventType || '').toLowerCase().trim());
-  if (EventCatalog[key]) return EventCatalog[key];
-
-  const aliases = {
-    'onedrive_running': 'process_running',
-    'onedrive_missing': 'process_missing',
-    'auth_failed':      'auth_error',
-    'net_fail':         'connectivity_fail',
-    'errors_high':      'file_errors_high',
-    'errors_some':      'partial_errors',
-    'stuck_pending':    'pending_long',
-    'asleep':           'device_asleep',
-    'shutdown':         'device_shutdown',
-  };
-  if (aliases[key] && EventCatalog[aliases[key]]) {
-    return EventCatalog[aliases[key]];
+function normalizeEvent(eventType, status) {
+  const normalized = eventCatalog[eventType];
+  if (normalized) {
+    return normalized;
   }
-
-  // Map based on input status to frontend event types
-  const s = String((inputStatus || '').toLowerCase().trim());
-  if (s === 'ok') {
-    return { status: 'ok', eventType: 'sync_status_check' };
-  } else if (s === 'warn') {
-    return { status: 'warn', eventType: 'sync_status_check' };
-  } else if (s === 'error') {
+  
+  // Fallback normalization based on status
+  if (status === 'error') {
     return { status: 'error', eventType: 'sync_error' };
-  } else if (s === 'asleep') {
-    return { status: 'asleep', eventType: 'sync_status_check' };
+  } else if (status === 'warn') {
+    return { status: 'warn', eventType: 'sync_status_check' };
+  } else {
+    return { status: 'ok', eventType: 'sync_status_check' };
   }
-
-  return { status: 'warn', eventType: 'sync_status_check' };
 }
 
-// ---------- Enhanced heartbeat insert ----------
-async function handleHeartbeatInsert(client, {
-  licenseKey, deviceHash, rawStatus, rawEventType, message, errorDetail
-}) {
-  if (!licenseKey || !deviceHash) {
-    return { http: 400, body: { error: 'Missing licenseKey/deviceHash' } };
-  }
-
-  // license
-  const lic = await client.query(
-    `select id, status, max_devices from licenses where key=$1 limit 1`,
-    [licenseKey]
-  );
-  if (lic.rows.length === 0) return { http: 401, body: { error: 'License not found' } };
-  const L = lic.rows[0];
-  if ((L.status || 'active') !== 'active') return { http: 403, body: { error: `License ${L.status}` } };
-
-  // binding + seats (only count active devices)
-  const bound = await client.query(
-    `select id, status from license_bindings where license_id=$1 and device_hash=$2 limit 1`,
-    [L.id, deviceHash]
-  );
-  
-  if (bound.rows.length === 0) {
-    const cnt = await client.query(
-      `select count(*)::int as c from license_bindings where license_id=$1 and status = 'active'`,
-      [L.id]
-    );
-    if (cnt.rows[0].c >= (L.max_devices || 1)) {
-      return { http: 403, body: { error: 'Seat limit reached' } };
-    }
-    await client.query(
-      `insert into license_bindings(license_id, device_hash, device_name, status)
-       values($1,$2,$3,'active')
-       on conflict (license_id, device_hash) do nothing`,
-      [L.id, deviceHash, deviceHash]
-    );
-
-    // Log device registration
-    await client.query(
-      `INSERT INTO device_management_log (license_id, device_hash, action, details)
-       VALUES ($1, $2, 'device_registered', 'New device automatically registered')`,
-      [L.id, deviceHash]
-    );
-  } else if (bound.rows[0].status === 'removed') {
-    return { http: 403, body: { error: 'Device has been removed. Contact support to reactivate.' } };
-  }
-
-  // Update last seen and reactivate if needed
-  await updateDeviceLastSeen(client, L.id, deviceHash);
-
-  // normalize + insert
-  const normalized = normalizeEvent(rawStatus, rawEventType);
-  const finalStatus    = normalized.status;
-  const finalEventType = normalized.eventType;
-
-  await client.query(
-    `insert into heartbeats(license_id, device_hash, status, event_type, message, error_detail)
-     values($1,$2,$3,$4,$5,$6)`,
-    [L.id, deviceHash, finalStatus, finalEventType, message || null, errorDetail ?? null]
-  );
-
-  return { http: 200, body: { ok: true, normalized: { status: finalStatus, eventType: finalEventType } } };
-}
-
-// ---------- Authentication Routes ----------
-app.post('/api/auth/register', async (req, res) => {
+// ---------- License Validation Middleware ----------
+async function validateLicense(licenseKey) {
   const client = await pool.connect();
   try {
-    const { email, password, name } = req.body;
-    
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email and password required' });
-    }
-    
-    // Check if user already exists
-    const existing = await client.query('SELECT id FROM users WHERE email = $1', [email]);
-    if (existing.rows.length > 0) {
-      return res.status(400).json({ message: 'User already exists' });
-    }
-    
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-    
-    // Create user with name (use email prefix if no name provided)
-    const userName = name || email.split('@')[0];
     const result = await client.query(
-      'INSERT INTO users (email, password, name) VALUES ($1, $2, $3) RETURNING id, email, name, created_at',
-      [email, hashedPassword, userName]
-    );
-    
-    const user = result.rows[0];
-    req.session.userId = user.id;
-    
-    res.json({ user });
-  } catch (error) {
-    console.error('Registration error:', error);
-    res.status(500).json({ message: error.message });
-  } finally {
-    client.release();
-  }
-});
-
-app.post('/api/auth/login', async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { email, password } = req.body;
-    
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email and password required' });
-    }
-    
-    // Get user
-    const result = await client.query('SELECT id, email, password, name, created_at FROM users WHERE email = $1', [email]);
-    if (result.rows.length === 0) {
-      return res.status(401).json({ message: 'Invalid credentials' });
-    }
-    
-    const user = result.rows[0];
-    
-    // Verify password
-    const isValid = await bcrypt.compare(password, user.password);
-    if (!isValid) {
-      return res.status(401).json({ message: 'Invalid credentials' });
-    }
-    
-    // Set session
-    req.session.userId = user.id;
-    
-    // Return user without password
-    const { password: userPassword, ...userWithoutPassword } = user;
-    res.json({ user: userWithoutPassword });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ message: error.message });
-  } finally {
-    client.release();
-  }
-});
-
-app.get('/api/auth/me', async (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({ message: 'Not authenticated' });
-  }
-  
-  const client = await pool.connect();
-  try {
-    const result = await client.query('SELECT id, email, name, created_at FROM users WHERE id = $1', [req.session.userId]);
-    if (result.rows.length === 0) {
-      return res.status(401).json({ message: 'User not found' });
-    }
-    
-    res.json({ user: result.rows[0] });
-  } catch (error) {
-    console.error('Get user error:', error);
-    res.status(500).json({ message: error.message });
-  } finally {
-    client.release();
-  }
-});
-
-app.post('/api/auth/logout', (req, res) => {
-  req.session.destroy((err) => {
-    if (err) {
-      return res.status(500).json({ message: 'Could not log out' });
-    }
-    res.json({ success: true });
-  });
-});
-
-// ---------- Enhanced Dashboard Stats Route ----------
-app.get('/api/dashboard/stats', async (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({ message: 'Not authenticated' });
-  }
-
-  const client = await pool.connect();
-  try {
-    // Get user's email to find their licenses
-    const userResult = await client.query('SELECT email FROM users WHERE id = $1', [req.session.userId]);
-    if (userResult.rows.length === 0) {
-      return res.status(401).json({ message: 'User not found' });
-    }
-
-    const userEmail = userResult.rows[0].email;
-
-    // Get licenses for this user (you may want to adjust this logic)
-    const licensesResult = await client.query('SELECT id, max_devices FROM licenses WHERE customer_email = $1 OR $1 = $2', [userEmail, 'test@syncsure.com']);
-    
-    if (licensesResult.rows.length === 0) {
-      return res.json({
-        totalDevices: 0,
-        activeDevices: 0,
-        healthyDevices: 0,
-        warningDevices: 0,
-        errorDevices: 0,
-        asleepDevices: 0,
-        gracePeriodDevices: 0,
-        seatsUsed: 0,
-        seatsTotal: 0,
-        lastUpdate: new Date().toISOString()
-      });
-    }
-
-    const licenseIds = licensesResult.rows.map(l => l.id);
-    const seatsTotal = licensesResult.rows.reduce((sum, l) => sum + l.max_devices, 0);
-
-    // Get latest heartbeat status for each device in last 10 minutes
-    const heartbeatsResult = await client.query(`
-      SELECT DISTINCT ON (device_hash) device_hash, status, created_at
-      FROM heartbeats 
-      WHERE license_id = ANY($1) AND created_at > NOW() - INTERVAL '10 minutes'
-      ORDER BY device_hash, created_at DESC
-    `, [licenseIds]);
-
-    // Get device management stats
-    const deviceStatsResult = await client.query(`
-      SELECT 
-        COUNT(*) as total_devices,
-        COUNT(*) FILTER (WHERE status = 'active') as active_devices,
-        COUNT(*) FILTER (WHERE status = 'grace_period') as grace_period_devices
-      FROM license_bindings 
-      WHERE license_id = ANY($1) AND status != 'removed'
-    `, [licenseIds]);
-
-    const stats = {
-      totalDevices: 0,
-      activeDevices: 0,
-      healthyDevices: 0,
-      warningDevices: 0,
-      errorDevices: 0,
-      asleepDevices: 0,
-      gracePeriodDevices: parseInt(deviceStatsResult.rows[0]?.grace_period_devices) || 0,
-      seatsUsed: parseInt(deviceStatsResult.rows[0]?.active_devices) || 0,
-      seatsTotal,
-      lastUpdate: new Date().toISOString()
-    };
-
-    heartbeatsResult.rows.forEach(heartbeat => {
-      stats.totalDevices++;
-      stats.activeDevices++;
-
-      switch (heartbeat.status) {
-        case 'ok':
-          stats.healthyDevices++;
-          break;
-        case 'warn':
-          stats.warningDevices++;
-          break;
-        case 'error':
-          stats.errorDevices++;
-          break;
-        case 'asleep':
-          stats.asleepDevices++;
-          break;
-      }
-    });
-
-    res.json(stats);
-  } catch (error) {
-    console.error('Dashboard stats error:', error);
-    res.status(500).json({ message: error.message });
-  } finally {
-    client.release();
-  }
-});
-
-// ---------- Enhanced Heartbeats Route ----------
-app.get('/api/heartbeats', async (req, res) => {
-  const licenseKey = (req.query.licenseKey || '').trim();
-  if (!licenseKey) return res.status(400).json({ error: 'licenseKey is required' });
-
-  const client = await pool.connect();
-  try {
-    const lic = await client.query(
-      `SELECT id FROM licenses WHERE key=$1 LIMIT 1`,
+      'SELECT id, status, max_devices, customer_email FROM licenses WHERE key = $1',
       [licenseKey]
     );
-    if (lic.rows.length === 0) return res.status(404).json({ error: 'License not found' });
-    const licenseId = lic.rows[0].id;
+    
+    if (result.rowCount === 0) {
+      return { valid: false, error: 'Invalid license key' };
+    }
+    
+    const license = result.rows[0];
+    
+    if (license.status !== 'active') {
+      return { valid: false, error: 'License is not active' };
+    }
+    
+    return { valid: true, license };
+  } catch (error) {
+    console.error('License validation error:', error);
+    return { valid: false, error: 'License validation failed' };
+  } finally {
+    client.release();
+  }
+}
 
-    // Get devices with enhanced status information
-    const devicesResult = await client.query(`
-      SELECT
+// ---------- Device Management Functions ----------
+async function updateDeviceLastSeen(licenseId, deviceHash) {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      UPDATE license_bindings 
+      SET last_seen = NOW(), 
+          status = 'active',
+          grace_period_start = NULL
+      WHERE license_id = $1 AND device_hash = $2
+    `, [licenseId, deviceHash]);
+  } catch (error) {
+    console.error('Error updating device last seen:', error);
+  } finally {
+    client.release();
+  }
+}
+
+async function bindDeviceToLicense(licenseId, deviceHash) {
+  const client = await pool.connect();
+  try {
+    // Check current device count for this license
+    const countResult = await client.query(
+      'SELECT COUNT(*) as count FROM license_bindings WHERE license_id = $1 AND status != \'removed\'',
+      [licenseId]
+    );
+    
+    const currentDevices = parseInt(countResult.rows[0].count);
+    
+    // Get license max devices
+    const licenseResult = await client.query(
+      'SELECT max_devices FROM licenses WHERE id = $1',
+      [licenseId]
+    );
+    
+    const maxDevices = licenseResult.rows[0]?.max_devices || 1;
+    
+    if (currentDevices >= maxDevices) {
+      return { success: false, error: 'Device seat limit reached' };
+    }
+    
+    // Bind device to license
+    await client.query(`
+      INSERT INTO license_bindings (license_id, device_hash, device_name, status, last_seen)
+      VALUES ($1, $2, $3, 'active', NOW())
+      ON CONFLICT (license_id, device_hash) 
+      DO UPDATE SET 
+        last_seen = NOW(),
+        status = 'active',
+        grace_period_start = NULL,
+        device_name = COALESCE(license_bindings.device_name, EXCLUDED.device_name)
+    `, [licenseId, deviceHash, deviceHash]);
+    
+    // Log the binding
+    await client.query(`
+      INSERT INTO device_management_log (license_id, device_hash, action, details)
+      VALUES ($1, $2, 'device_bound', 'Device automatically bound to license')
+    `, [licenseId, deviceHash]);
+    
+    return { success: true };
+  } catch (error) {
+    console.error('Error binding device to license:', error);
+    return { success: false, error: 'Failed to bind device' };
+  } finally {
+    client.release();
+  }
+}
+
+// ---------- Enhanced Heartbeat Handler ----------
+async function handleHeartbeatInsert(licenseId, deviceHash, status, eventType, message, rawData) {
+  const client = await pool.connect();
+  try {
+    // Check if device is bound to license
+    const bound = await client.query(
+      'SELECT license_id, device_hash, status FROM license_bindings WHERE license_id = $1 AND device_hash = $2 LIMIT 1',
+      [licenseId, deviceHash]
+    );
+    
+    if (bound.rowCount === 0) {
+      // Auto-bind device to license
+      const bindResult = await bindDeviceToLicense(licenseId, deviceHash);
+      if (!bindResult.success) {
+        throw new Error(bindResult.error);
+      }
+    } else {
+      // Update last seen for existing device
+      await updateDeviceLastSeen(licenseId, deviceHash);
+    }
+    
+    // Insert heartbeat record
+    await client.query(`
+      INSERT INTO heartbeats (license_id, device_hash, status, event_type, message, raw_data, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    `, [licenseId, deviceHash, status, eventType, message, rawData]);
+    
+  } catch (error) {
+    console.error('Heartbeat insert error:', error);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+// ---------- Device Management Automation ----------
+async function runDeviceManagement() {
+  const client = await pool.connect();
+  try {
+    console.log('🔧 Running device management cycle...');
+    
+    const now = new Date();
+    const sevenDaysAgo = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
+    const thirtyDaysAgo = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
+    
+    // Find devices entering grace period (offline 7+ days, not already in grace period)
+    const gracePeriodDevices = await client.query(`
+      SELECT lb.license_id, lb.device_hash, lb.device_name, l.customer_email, l.key as license_key
+      FROM license_bindings lb
+      JOIN licenses l ON lb.license_id = l.id
+      WHERE lb.last_seen < $1 
+        AND lb.status = 'active'
+        AND lb.grace_period_start IS NULL
+    `, [sevenDaysAgo]);
+    
+    // Move devices to grace period
+    for (const device of gracePeriodDevices.rows) {
+      await client.query(`
+        UPDATE license_bindings 
+        SET status = 'grace_period', grace_period_start = NOW()
+        WHERE license_id = $1 AND device_hash = $2
+      `, [device.license_id, device.device_hash]);
+      
+      // Log the action
+      await client.query(`
+        INSERT INTO device_management_log (license_id, device_hash, action, details)
+        VALUES ($1, $2, 'grace_period_started', 'Device offline for 7+ days, grace period started')
+      `, [device.license_id, device.device_hash]);
+      
+      // Send email notification
+      if (resend && device.customer_email && !device.offline_notification_sent) {
+        try {
+          await resend.emails.send({
+            from: process.env.FROM_EMAIL || 'SyncSure <noreply@syncsure.com>',
+            to: device.customer_email,
+            subject: `SyncSure Alert: Device "${device.device_name}" Offline`,
+            html: `
+              <h2>Device Offline Alert</h2>
+              <p>Your SyncSure device <strong>${device.device_name}</strong> has been offline for 7+ days.</p>
+              <p><strong>License:</strong> ${device.license_key}</p>
+              <p><strong>Grace Period:</strong> 23 days remaining before automatic removal</p>
+              <p>If this device is no longer needed, no action is required. It will be automatically removed in 23 days to free up your license seat.</p>
+              <p>If you need this device, please restart the SyncSure agent on that computer.</p>
+            `
+          });
+          
+          // Mark notification as sent
+          await client.query(`
+            UPDATE license_bindings 
+            SET offline_notification_sent = true
+            WHERE license_id = $1 AND device_hash = $2
+          `, [device.license_id, device.device_hash]);
+          
+          console.log(`📧 Grace period email sent to ${device.customer_email} for device ${device.device_name}`);
+        } catch (emailError) {
+          console.error('Email sending error:', emailError);
+        }
+      }
+    }
+    
+    // Find devices to remove (offline 30+ days)
+    const devicesToRemove = await client.query(`
+      SELECT lb.license_id, lb.device_hash, lb.device_name, l.customer_email, l.key as license_key
+      FROM license_bindings lb
+      JOIN licenses l ON lb.license_id = l.id
+      WHERE lb.last_seen < $1 
+        AND lb.status IN ('active', 'grace_period')
+    `, [thirtyDaysAgo]);
+    
+    // Remove devices and free up seats
+    for (const device of devicesToRemove.rows) {
+      await client.query(`
+        UPDATE license_bindings 
+        SET status = 'removed'
+        WHERE license_id = $1 AND device_hash = $2
+      `, [device.license_id, device.device_hash]);
+      
+      // Log the removal
+      await client.query(`
+        INSERT INTO device_management_log (license_id, device_hash, action, details)
+        VALUES ($1, $2, 'device_removed', 'Device offline for 30+ days, automatically removed to free license seat')
+      `, [device.license_id, device.device_hash]);
+      
+      // Send cleanup notification email
+      if (resend && device.customer_email && !device.cleanup_notification_sent) {
+        try {
+          await resend.emails.send({
+            from: process.env.FROM_EMAIL || 'SyncSure <noreply@syncsure.com>',
+            to: device.customer_email,
+            subject: `SyncSure: Device "${device.device_name}" Removed`,
+            html: `
+              <h2>Device Automatically Removed</h2>
+              <p>Your SyncSure device <strong>${device.device_name}</strong> has been automatically removed after being offline for 30+ days.</p>
+              <p><strong>License:</strong> ${device.license_key}</p>
+              <p><strong>Benefit:</strong> This has freed up a license seat for new devices</p>
+              <p>If you need to monitor this device again, simply install and run SyncSure on that computer with your license key.</p>
+            `
+          });
+          
+          // Mark cleanup notification as sent
+          await client.query(`
+            UPDATE license_bindings 
+            SET cleanup_notification_sent = true
+            WHERE license_id = $1 AND device_hash = $2
+          `, [device.license_id, device.device_hash]);
+          
+          console.log(`📧 Cleanup email sent to ${device.customer_email} for device ${device.device_name}`);
+        } catch (emailError) {
+          console.error('Cleanup email error:', emailError);
+        }
+      }
+    }
+    
+    console.log(`✅ Device management completed: ${gracePeriodDevices.rowCount} grace period, ${devicesToRemove.rowCount} removed`);
+    
+  } catch (error) {
+    console.error('Device management error:', error);
+  } finally {
+    client.release();
+  }
+}
+
+// Schedule device management
+cron.schedule('0 2 * * *', runDeviceManagement); // Daily at 2 AM
+cron.schedule('0 */6 * * *', runDeviceManagement); // Every 6 hours
+
+// ---------- API Routes ----------
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// Enhanced heartbeat endpoint with license validation
+app.post('/api/heartbeat', async (req, res) => {
+  try {
+    const { licenseKey, deviceHash, status, eventType, message, timestamp } = req.body;
+    
+    // Validate required fields
+    if (!licenseKey || !deviceHash || !status || !eventType) {
+      return res.status(400).json({ 
+        error: 'Missing required fields: licenseKey, deviceHash, status, eventType' 
+      });
+    }
+    
+    // Validate license
+    const licenseValidation = await validateLicense(licenseKey);
+    if (!licenseValidation.valid) {
+      return res.status(401).json({ error: licenseValidation.error });
+    }
+    
+    const license = licenseValidation.license;
+    
+    // Normalize event
+    const normalized = normalizeEvent(eventType, status);
+    
+    // Store heartbeat with enhanced device management
+    await handleHeartbeatInsert(
+      license.id, 
+      deviceHash, 
+      normalized.status, 
+      normalized.eventType, 
+      message || '', 
+      req.body
+    );
+    
+    res.json({ 
+      ok: true, 
+      normalized: normalized,
+      license_info: `${licenseKey} (${license.customer_email})`
+    });
+    
+  } catch (error) {
+    console.error('Heartbeat error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Offline heartbeat endpoint
+app.post('/api/heartbeat/offline', async (req, res) => {
+  try {
+    const { licenseKey, deviceHash, reason } = req.body;
+    
+    if (!licenseKey || !deviceHash) {
+      return res.status(400).json({ error: 'Missing licenseKey or deviceHash' });
+    }
+    
+    // Validate license
+    const licenseValidation = await validateLicense(licenseKey);
+    if (!licenseValidation.valid) {
+      return res.status(401).json({ error: licenseValidation.error });
+    }
+    
+    const license = licenseValidation.license;
+    
+    // Store offline heartbeat
+    await handleHeartbeatInsert(
+      license.id,
+      deviceHash,
+      'ok',
+      'sync_status_check',
+      reason || 'Device going offline',
+      { ...req.body, offline: true }
+    );
+    
+    res.json({ ok: true, message: 'Offline heartbeat recorded' });
+    
+  } catch (error) {
+    console.error('Offline heartbeat error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Enhanced devices API with device management info
+app.get('/api/devices/:licenseKey', async (req, res) => {
+  try {
+    const { licenseKey } = req.params;
+    
+    // Validate license
+    const licenseValidation = await validateLicense(licenseKey);
+    if (!licenseValidation.valid) {
+      return res.status(401).json({ error: licenseValidation.error });
+    }
+    
+    const license = licenseValidation.license;
+    
+    // Get devices with enhanced information
+    const result = await client.query(`
+      SELECT 
+        lb.license_id,
         lb.device_hash,
-        COALESCE(lb.device_name, lb.device_hash) as device_name,
+        lb.bound_at,
+        lb.device_name,
+        lb.status,
+        lb.grace_period_start,
+        lb.offline_notification_sent,
+        lb.cleanup_notification_sent,
+        lb.last_seen,
+        EXTRACT(EPOCH FROM (NOW() - lb.last_seen)) / 3600 as hours_offline,
+        CASE 
+          WHEN lb.last_seen > NOW() - INTERVAL '5 minutes' THEN 'Online'
+          WHEN lb.last_seen > NOW() - INTERVAL '1 hour' THEN 'Recently Online'
+          WHEN lb.status = 'grace_period' THEN 'Grace Period'
+          WHEN lb.status = 'removed' THEN 'Removed'
+          ELSE 'Offline'
+        END as connection_status
+      FROM license_bindings lb
+      WHERE lb.license_id = $1 AND lb.status != 'removed'
+      ORDER BY lb.last_seen DESC
+    `, [license.id]);
+    
+    res.json({
+      licenseKey: licenseKey,
+      maxDevices: license.max_devices,
+      devices: result.rows
+    });
+    
+  } catch (error) {
+    console.error('Devices API error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Enhanced heartbeats API with device management
+app.get('/api/heartbeats', async (req, res) => {
+  try {
+    const { licenseKey } = req.query;
+    
+    if (!licenseKey) {
+      return res.status(400).json({ error: 'licenseKey parameter required' });
+    }
+    
+    // Validate license
+    const licenseValidation = await validateLicense(licenseKey);
+    if (!licenseValidation.valid) {
+      return res.status(401).json({ error: licenseValidation.error });
+    }
+    
+    const license = licenseValidation.license;
+    
+    // Get latest heartbeat for each device with enhanced info
+    const result = await client.query(`
+      SELECT DISTINCT ON (lb.device_hash)
+        lb.device_hash,
+        lb.device_name,
         lb.last_seen,
         lb.status as device_status,
         lb.grace_period_start,
-        (array_agg(h.status ORDER BY h.created_at DESC))[1] as last_status,
-        (array_agg(h.event_type ORDER BY h.created_at DESC))[1] as last_event_type,
-        (array_agg(h.message ORDER BY h.created_at DESC))[1] as last_message,
+        h.status as last_status,
+        h.event_type as last_event_type,
+        h.message as last_message,
         CASE 
-          WHEN lb.status = 'removed' THEN 'offline'
-          WHEN lb.last_seen < NOW() - INTERVAL '5 minutes' THEN 'offline'
-          ELSE COALESCE((array_agg(h.status ORDER BY h.created_at DESC))[1], 'unknown')
+          WHEN h.status = 'error' THEN 'error'
+          WHEN h.status = 'warn' THEN 'warn'
+          ELSE 'ok'
         END as display_status
       FROM license_bindings lb
       LEFT JOIN heartbeats h ON lb.license_id = h.license_id AND lb.device_hash = h.device_hash
       WHERE lb.license_id = $1 AND lb.status != 'removed'
-      GROUP BY lb.device_hash, lb.device_name, lb.last_seen, lb.status, lb.grace_period_start
-      ORDER BY lb.last_seen DESC
-    `, [licenseId]);
-
-    res.json({ devices: devicesResult.rows });
+      ORDER BY lb.device_hash, h.created_at DESC
+    `, [license.id]);
+    
+    res.json({ devices: result.rows });
+    
   } catch (error) {
     console.error('Heartbeats error:', error);
-    res.status(500).json({ message: error.message });
-  } finally {
-    client.release();
+    res.status(500).json({ error: error.message });
   }
 });
 
-// ---------- Agent heartbeat route ----------
-app.post('/api/heartbeat', async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { licenseKey, deviceHash, status, eventType, message, errorDetail } = req.body || {};
-    const result = await handleHeartbeatInsert(client, {
-      licenseKey, deviceHash, rawStatus: status, rawEventType: eventType, message, errorDetail
-    });
-    res.status(result.http).json(result.body);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message || 'server error' });
-  } finally {
-    client.release();
-  }
-});
-
-// ---------- Offline heartbeat route ----------
-app.post('/api/heartbeat/offline', async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { licenseKey, deviceHash, message, errorDetail, reason } = req.body || {};
-    const mappedEvent = String((reason || '').toLowerCase()) === 'sleep' ? 'device_asleep' : 'device_shutdown';
-    const result = await handleHeartbeatInsert(client, {
-      licenseKey,
-      deviceHash,
-      rawStatus: 'asleep',
-      rawEventType: mappedEvent,
-      message: message || (mappedEvent === 'device_asleep' ? 'system sleep' : 'system shutdown'),
-      errorDetail
-    });
-    res.status(result.http).json(result.body);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message || 'server error' });
-  } finally {
-    client.release();
-  }
-});
-
-// ---------- Enhanced Device Management API ----------
-app.get('/api/devices/:licenseKey', async (req, res) => {
-  const { licenseKey } = req.params;
-  const client = await pool.connect();
-  try {
-    const lic = await client.query(
-      `SELECT id, max_devices FROM licenses WHERE key=$1 LIMIT 1`,
-      [licenseKey]
-    );
-    if (lic.rows.length === 0) return res.status(404).json({ error: 'License not found' });
-
-    const devices = await client.query(`
-      SELECT 
-        lb.*,
-        EXTRACT(EPOCH FROM (NOW() - lb.last_seen))/3600 as hours_offline,
-        CASE 
-          WHEN lb.status = 'removed' THEN 'Removed'
-          WHEN lb.status = 'grace_period' THEN 'Grace Period'
-          WHEN lb.last_seen < NOW() - INTERVAL '5 minutes' THEN 'Offline'
-          ELSE 'Online'
-        END as connection_status
-      FROM license_bindings lb
-      WHERE lb.license_id = $1
-      ORDER BY lb.last_seen DESC
-    `, [lic.rows[0].id]);
-
-    res.json({
-      licenseKey,
-      maxDevices: lic.rows[0].max_devices,
-      devices: devices.rows
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message || 'server error' });
-  } finally {
-    client.release();
-  }
-});
-
-// Manual device removal
-app.delete('/api/devices/:licenseKey/:deviceHash', async (req, res) => {
-  const { licenseKey, deviceHash } = req.params;
-  const client = await pool.connect();
-  try {
-    const lic = await client.query(
-      `SELECT id FROM licenses WHERE key=$1 LIMIT 1`,
-      [licenseKey]
-    );
-    if (lic.rows.length === 0) return res.status(404).json({ error: 'License not found' });
-
-    await client.query(
-      `UPDATE license_bindings SET status = 'removed' WHERE license_id = $1 AND device_hash = $2`,
-      [lic.rows[0].id, deviceHash]
-    );
-
-    await client.query(
-      `INSERT INTO device_management_log (license_id, device_hash, action, details)
-       VALUES ($1, $2, 'manual_removal', 'Device manually removed via API')`,
-      [lic.rows[0].id, deviceHash]
-    );
-
-    res.json({ ok: true, message: 'Device removed successfully' });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message || 'server error' });
-  } finally {
-    client.release();
-  }
-});
-
-// ---------- License routes ----------
-app.get('/api/licenses', async (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({ message: 'Not authenticated' });
-  }
-
-  const client = await pool.connect();
-  try {
-    // Get user email
-    const userResult = await client.query('SELECT email FROM users WHERE id = $1', [req.session.userId]);
-    if (userResult.rows.length === 0) {
-      return res.status(401).json({ message: 'User not found' });
-    }
-
-    const userEmail = userResult.rows[0].email;
-
-    // Get licenses for this user with device counts
-    const licensesResult = await client.query(`
-      SELECT l.*, 
-        COUNT(lb.device_hash) FILTER (WHERE lb.status = 'active') as active_devices_count,
-        COUNT(lb.device_hash) FILTER (WHERE lb.status = 'grace_period') as grace_period_devices_count,
-        COUNT(lb.device_hash) as total_devices_count
-      FROM licenses l
-      LEFT JOIN license_bindings lb ON l.id = lb.license_id AND lb.status != 'removed'
-      WHERE l.customer_email = $1 OR $1 = $2
-      GROUP BY l.id
-      ORDER BY l.created_at DESC
-    `, [userEmail, 'test@syncsure.com']);
-
-    res.json(licensesResult.rows);
-  } catch (error) {
-    console.error('Licenses error:', error);
-    res.status(500).json({ message: error.message });
-  } finally {
-    client.release();
-  }
-});
-
-// ---------- Manual Device Management Trigger (for testing) ----------
+// Manual device management trigger
 app.post('/api/admin/run-device-management', async (req, res) => {
   try {
-    await processDeviceManagement();
+    await runDeviceManagement();
     res.json({ ok: true, message: 'Device management completed' });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message || 'server error' });
+  } catch (error) {
+    console.error('Manual device management error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// ---------- Database Migration Endpoint ----------
+// Database migration endpoint
 app.post('/api/admin/migrate-database', async (req, res) => {
   const client = await pool.connect();
   try {
     console.log('🔧 Running database migration...');
     
-    // Add missing columns to license_bindings
+    // Add missing columns to license_bindings table
     const columns = [
       'ALTER TABLE license_bindings ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ DEFAULT NOW()',
       'ALTER TABLE license_bindings ADD COLUMN IF NOT EXISTS device_name VARCHAR(255)',
@@ -986,6 +787,29 @@ app.post('/api/admin/migrate-database', async (req, res) => {
     
     for (const sql of columns) {
       await client.query(sql);
+    }
+    
+    // Safely add ID column if it doesn't exist
+    const idColumnExists = await client.query(`
+      SELECT 1 FROM information_schema.columns 
+      WHERE table_name='license_bindings' AND column_name='id'
+    `);
+    
+    if (idColumnExists.rowCount === 0) {
+      console.log('🔧 Adding ID column to license_bindings table...');
+      await client.query('ALTER TABLE license_bindings ADD COLUMN id BIGSERIAL;');
+      
+      // Check if primary key exists
+      const pkExists = await client.query(`
+        SELECT 1 FROM information_schema.table_constraints 
+        WHERE table_name='license_bindings' AND constraint_type='PRIMARY KEY'
+      `);
+      
+      if (pkExists.rowCount === 0) {
+        await client.query('ALTER TABLE license_bindings ADD CONSTRAINT license_bindings_pkey PRIMARY KEY (id);');
+      }
+      
+      console.log('✅ ID column added successfully');
     }
     
     // Update existing records
@@ -1008,16 +832,246 @@ app.post('/api/admin/migrate-database', async (req, res) => {
   }
 });
 
-// ---------- Error handler ----------
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({ message: 'Internal server error' });
+// Remove device endpoint
+app.delete('/api/devices/:licenseKey/:deviceHash', async (req, res) => {
+  try {
+    const { licenseKey, deviceHash } = req.params;
+    
+    // Validate license
+    const licenseValidation = await validateLicense(licenseKey);
+    if (!licenseValidation.valid) {
+      return res.status(401).json({ error: licenseValidation.error });
+    }
+    
+    const license = licenseValidation.license;
+    
+    const client = await pool.connect();
+    try {
+      // Remove device (mark as removed)
+      await client.query(`
+        UPDATE license_bindings 
+        SET status = 'removed'
+        WHERE license_id = $1 AND device_hash = $2
+      `, [license.id, deviceHash]);
+      
+      // Log the manual removal
+      await client.query(`
+        INSERT INTO device_management_log (license_id, device_hash, action, details)
+        VALUES ($1, $2, 'manual_removal', 'Device manually removed by admin')
+      `, [license.id, deviceHash]);
+      
+      res.json({ ok: true, message: 'Device removed successfully' });
+      
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    console.error('Device removal error:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// ---------- Start server ----------
-const PORT = parseInt(process.env.PORT || '5000', 10);
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 SyncSure Backend with Device Management running on port ${PORT}`);
-  console.log(`📧 Email notifications: ${resend ? 'Enabled' : 'Disabled (set RESEND_API_KEY)'}`);
-  console.log(`⏰ Device management scheduled: Daily at 2 AM and every 6 hours`);
+// Dashboard statistics
+app.get('/api/dashboard/stats', async (req, res) => {
+  try {
+    const client = await pool.connect();
+    try {
+      const stats = await client.query(`
+        SELECT 
+          COUNT(*) as total_devices,
+          COUNT(*) FILTER (WHERE status = 'active') as active_devices,
+          COUNT(*) FILTER (WHERE status = 'grace_period') as grace_period_devices,
+          COUNT(*) FILTER (WHERE status = 'removed') as removed_devices,
+          COUNT(*) FILTER (WHERE last_seen > NOW() - INTERVAL '5 minutes') as online_devices,
+          COUNT(*) FILTER (WHERE last_seen < NOW() - INTERVAL '1 hour') as offline_devices
+        FROM license_bindings
+      `);
+      
+      res.json(stats.rows[0]);
+      
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    console.error('Dashboard stats error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Authentication routes
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password required' });
+    }
+    
+    const client = await pool.connect();
+    try {
+      // Check if user already exists
+      const existingUser = await client.query('SELECT id FROM users WHERE email = $1', [email]);
+      if (existingUser.rowCount > 0) {
+        return res.status(409).json({ error: 'User already exists' });
+      }
+      
+      // Hash password
+      const hashedPassword = await bcrypt.hash(password, 10);
+      
+      // Create user
+      const result = await client.query(
+        'INSERT INTO users (email, password, pw_hash) VALUES ($1, $2, $3) RETURNING id, email, created_at',
+        [email, password, hashedPassword]
+      );
+      
+      const user = result.rows[0];
+      req.session.userId = user.id;
+      req.session.userEmail = user.email;
+      
+      res.json({ 
+        ok: true, 
+        user: { id: user.id, email: user.email, created_at: user.created_at }
+      });
+      
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password required' });
+    }
+    
+    const client = await pool.connect();
+    try {
+      // Find user
+      const result = await client.query('SELECT id, email, pw_hash, created_at FROM users WHERE email = $1', [email]);
+      if (result.rowCount === 0) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+      
+      const user = result.rows[0];
+      
+      // Verify password
+      const validPassword = await bcrypt.compare(password, user.pw_hash);
+      if (!validPassword) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+      
+      // Set session
+      req.session.userId = user.id;
+      req.session.userEmail = user.email;
+      
+      res.json({ 
+        ok: true, 
+        user: { id: user.id, email: user.email, created_at: user.created_at }
+      });
+      
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  req.session.destroy((err) => {
+    if (err) {
+      return res.status(500).json({ error: 'Logout failed' });
+    }
+    res.json({ ok: true, message: 'Logged out successfully' });
+  });
+});
+
+app.get('/api/auth/me', (req, res) => {
+  if (!req.session.userId) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  
+  res.json({ 
+    ok: true, 
+    user: { 
+      id: req.session.userId, 
+      email: req.session.userEmail 
+    }
+  });
+});
+
+// Licenses route
+app.get('/api/licenses', async (req, res) => {
+  try {
+    const client = await pool.connect();
+    try {
+      const result = await client.query(`
+        SELECT 
+          l.key,
+          l.status,
+          l.max_devices,
+          l.customer_email,
+          l.created_at,
+          COUNT(lb.device_hash) FILTER (WHERE lb.status != 'removed') as active_devices
+        FROM licenses l
+        LEFT JOIN license_bindings lb ON l.id = lb.license_id
+        GROUP BY l.id, l.key, l.status, l.max_devices, l.customer_email, l.created_at
+        ORDER BY l.created_at DESC
+      `);
+      
+      res.json({ licenses: result.rows });
+      
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    console.error('Licenses API error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Dashboard stats route
+app.get('/api/dashboard/stats', async (req, res) => {
+  try {
+    const client = await pool.connect();
+    try {
+      const stats = await client.query(`
+        SELECT 
+          COUNT(DISTINCT l.id) as total_licenses,
+          COUNT(DISTINCT l.id) FILTER (WHERE l.status = 'active') as active_licenses,
+          COUNT(lb.device_hash) as total_devices,
+          COUNT(lb.device_hash) FILTER (WHERE lb.status = 'active') as active_devices,
+          COUNT(lb.device_hash) FILTER (WHERE lb.status = 'grace_period') as grace_period_devices,
+          COUNT(lb.device_hash) FILTER (WHERE lb.last_seen > NOW() - INTERVAL '5 minutes') as online_devices
+        FROM licenses l
+        LEFT JOIN license_bindings lb ON l.id = lb.license_id AND lb.status != 'removed'
+      `);
+      
+      res.json(stats.rows[0]);
+      
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    console.error('Dashboard stats error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Start server
+app.listen(port, '0.0.0.0', () => {
+  console.log(`🌐 Server running on http://0.0.0.0:${port}`);
 });
