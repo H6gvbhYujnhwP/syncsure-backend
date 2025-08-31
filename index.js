@@ -25,12 +25,12 @@ async function ensureSchema() {
   try {
     console.log('🔧 Setting up database schema...');
     
-    // Create the users table if it doesn't exist - using pw_hash for password
+    // Create the users table if it doesn't exist - using password for password
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id          BIGSERIAL PRIMARY KEY,
         email       TEXT NOT NULL UNIQUE,
-        pw_hash     TEXT NOT NULL,
+        password    TEXT NOT NULL,
         created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
@@ -102,7 +102,7 @@ async function ensureSchema() {
     if (testUserExists.rows.length === 0) {
       const hashedPassword = await bcrypt.hash('password123', 10);
       await client.query(
-        'INSERT INTO users (email, pw_hash) VALUES ($1, $2)',
+        'INSERT INTO users (email, password) VALUES ($1, $2)',
         ['test@syncsure.com', hashedPassword]
       );
       console.log('✅ Created test user: test@syncsure.com / password123');
@@ -294,6 +294,7 @@ app.post('/api/auth/register', async (req, res) => {
     // Create user
     const result = await client.query(
       'INSERT INTO users (email, password) VALUES ($1, $2) RETURNING id, email, created_at',
+      [email, hashedPassword]
     );
     
     const user = result.rows[0];
@@ -571,5 +572,3 @@ const PORT = parseInt(process.env.PORT || '5000', 10);
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 SyncSure Backend running on port ${PORT}`);
 });
-
-
