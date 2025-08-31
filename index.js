@@ -1,12 +1,11 @@
 import express from 'express';
-import bodyParser from 'body-parser';
 import cors from 'cors';
 import session from 'express-session';
 import bcrypt from 'bcrypt';
 import pg from 'pg';
+import { v4 as uuidv4 } from 'uuid';
 
 const { Pool } = pg;
-
 const app = express();
 const port = process.env.PORT || 10000;
 
@@ -17,12 +16,12 @@ const pool = new Pool({
 });
 
 // Middleware
-app.use(bodyParser.json());
 app.use(cors({
-  origin: process.env.FRONTEND_ORIGIN || true,
+  origin: ['http://localhost:3000', 'https://syncsure-frontend.onrender.com'],
   credentials: true
 }));
 
+app.use(express.json());
 app.use(session({
   secret: process.env.SESSION_SECRET || 'your-secret-key',
   resave: false,
@@ -33,281 +32,335 @@ app.use(session({
   }
 }));
 
-console.log('🚀 SyncSure backend running on port', port);
+// Event normalization catalog
+const eventCatalog = {
+  // Sync status events
+  'sync_status_check': { status: 'ok', eventType: 'sync_status_check' },
+  'sync_healthy': { status: 'ok', eventType: 'sync_status_check' },
+  'sync_warning': { status: 'warn', eventType: 'sync_status_check' },
+  
+  // Pause events
+  'sync_paused': { status: 'warn', eventType: 'sync_paused' },
+  'onedrive_paused': { status: 'warn', eventType: 'sync_paused' },
+  'pause_detected': { status: 'warn', eventType: 'sync_paused' },
+  
+  // Error events
+  'sync_error': { status: 'error', eventType: 'sync_error' },
+  'sync_failed': { status: 'error', eventType: 'sync_error' },
+  'onedrive_error': { status: 'error', eventType: 'sync_error' },
+  
+  // Process events
+  'process_running': { status: 'ok', eventType: 'sync_status_check' },
+  'process_healthy': { status: 'ok', eventType: 'sync_status_check' },
+  'process_warning': { status: 'warn', eventType: 'sync_status_check' },
+  'process_error': { status: 'error', eventType: 'sync_error' },
+  
+  // Auth events
+  'auth_ok': { status: 'ok', eventType: 'sync_status_check' },
+  'auth_warning': { status: 'warn', eventType: 'sync_status_check' },
+  'auth_error': { status: 'error', eventType: 'sync_error' },
+  
+  // Storage events
+  'storage_ok': { status: 'ok', eventType: 'sync_status_check' },
+  'storage_warning': { status: 'warn', eventType: 'sync_status_check' },
+  'storage_error': { status: 'error', eventType: 'sync_error' },
+  
+  // Performance events
+  'performance_ok': { status: 'ok', eventType: 'sync_status_check' },
+  'performance_warning': { status: 'warn', eventType: 'sync_status_check' },
+  'performance_error': { status: 'error', eventType: 'sync_error' },
+  
+  // Connectivity events
+  'connectivity_ok': { status: 'ok', eventType: 'sync_status_check' },
+  'connectivity_warning': { status: 'warn', eventType: 'sync_status_check' },
+  'connectivity_error': { status: 'error', eventType: 'sync_error' },
+  
+  // Generic events
+  'ok': { status: 'ok', eventType: 'sync_status_check' },
+  'warn': { status: 'warn', eventType: 'sync_status_check' },
+  'warning': { status: 'warn', eventType: 'sync_status_check' },
+  'error': { status: 'error', eventType: 'sync_error' },
+  'offline': { status: 'error', eventType: 'sync_error' },
+  'asleep': { status: 'warn', eventType: 'sync_status_check' }
+};
 
-// ---------- Ensure users table exists and is correct ----------
+// Normalize event function
+function normalizeEvent(status, eventType) {
+  // First try exact eventType match
+  if (eventCatalog[eventType]) {
+    return eventCatalog[eventType];
+  }
+  
+  // Then try status match
+  if (eventCatalog[status]) {
+    return eventCatalog[status];
+  }
+  
+  // Default fallback based on status
+  switch (status) {
+    case 'ok':
+      return { status: 'ok', eventType: 'sync_status_check' };
+    case 'warn':
+    case 'warning':
+      return { status: 'warn', eventType: 'sync_status_check' };
+    case 'error':
+      return { status: 'error', eventType: 'sync_error' };
+    case 'asleep':
+    case 'offline':
+      return { status: 'warn', eventType: 'sync_status_check' };
+    default:
+      return { status: 'ok', eventType: 'sync_status_check' };
+  }
+}
+
+// Database schema setup
 async function ensureSchema() {
   const client = await pool.connect();
   try {
     console.log('🔧 Setting up database schema...');
     
-    // Create the users table if it doesn't exist
+    // Create users table
     await client.query(`
-      create table if not exists users (
-        id          bigserial primary key,
-        email       text not null unique,
-        password    text not null,
-        created_at  timestamptz not null default now()
-      );
+      CREATE TABLE IF NOT EXISTS users (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password VARCHAR(255) NOT NULL,
+        pw_hash VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
     `);
-
-    // Check for the pw_hash column and add it if it's missing
-    const res = await client.query(`
-      select 1 from information_schema.columns
-      where table_name='users' and column_name='pw_hash'
-    `);
-    if (res.rowCount === 0) {
-      console.log('Adding missing "pw_hash" column to "users" table...');
-      await client.query(`
-        alter table users add column pw_hash text not null default 'migration_placeholder';
-      `);
-      console.log('Column "pw_hash" added.');
-    }
 
     // Create licenses table
     await client.query(`
       CREATE TABLE IF NOT EXISTS licenses (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        key VARCHAR(255) NOT NULL UNIQUE,
-        status VARCHAR(50) NOT NULL DEFAULT 'active',
-        max_devices INTEGER NOT NULL DEFAULT 5,
+        key VARCHAR(255) UNIQUE NOT NULL,
+        status VARCHAR(50) DEFAULT 'active',
+        max_devices INTEGER DEFAULT 1,
         customer_email VARCHAR(255),
         stripe_customer_id VARCHAR(255),
         stripe_subscription_id VARCHAR(255),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        expires_at TIMESTAMPTZ NULL,
-        CONSTRAINT licenses_status_check CHECK (status IN ('active', 'suspended', 'cancelled', 'expired')),
-        CONSTRAINT licenses_max_devices_check CHECK (max_devices > 0)
-      );
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
     `);
 
-    // Create license_bindings table
+    // Create license_bindings table (simple version)
     await client.query(`
       CREATE TABLE IF NOT EXISTS license_bindings (
-        license_id UUID NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+        license_id UUID REFERENCES licenses(id) ON DELETE CASCADE,
         device_hash VARCHAR(255) NOT NULL,
-        bound_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        CONSTRAINT unique_license_device UNIQUE (license_id, device_hash)
-      );
+        bound_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (license_id, device_hash)
+      )
     `);
 
-    // Create heartbeats table
+    // Create heartbeats table (simple version)
     await client.query(`
       CREATE TABLE IF NOT EXISTS heartbeats (
-        id BIGSERIAL PRIMARY KEY,
-        license_id UUID NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        license_id UUID REFERENCES licenses(id) ON DELETE CASCADE,
         device_hash VARCHAR(255) NOT NULL,
         status VARCHAR(50) NOT NULL,
         event_type VARCHAR(100) NOT NULL,
         message TEXT,
-        raw_data JSONB,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        CONSTRAINT heartbeats_status_check CHECK (status IN ('ok', 'warn', 'error', 'asleep'))
-      );
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
     `);
 
-    // Create indexes
-    await client.query('CREATE INDEX IF NOT EXISTS idx_licenses_key ON licenses(key);');
-    await client.query('CREATE INDEX IF NOT EXISTS idx_license_bindings_license_id ON license_bindings(license_id);');
-    await client.query('CREATE INDEX IF NOT EXISTS idx_license_bindings_device_hash ON license_bindings(device_hash);');
-    await client.query('CREATE INDEX IF NOT EXISTS idx_heartbeats_license_id ON heartbeats(license_id);');
-    await client.query('CREATE INDEX IF NOT EXISTS idx_heartbeats_device_hash ON heartbeats(device_hash);');
-    await client.query('CREATE INDEX IF NOT EXISTS idx_heartbeats_created_at ON heartbeats(created_at);');
-
-    // Insert test licenses
+    // Create indexes for performance
     await client.query(`
-      INSERT INTO licenses (key, status, max_devices, customer_email) VALUES 
-        ('SYNC-TEST-123', 'active', 10, 'test@example.com'),
-        ('SYNC-DEMO-456', 'active', 5, 'demo@example.com'),
-        ('SYNC-PROD-789', 'active', 25, 'customer@example.com')
-      ON CONFLICT (key) DO UPDATE SET
-        status = EXCLUDED.status,
-        max_devices = EXCLUDED.max_devices,
-        customer_email = COALESCE(licenses.customer_email, EXCLUDED.customer_email);
+      CREATE INDEX IF NOT EXISTS idx_heartbeats_license_device 
+      ON heartbeats(license_id, device_hash)
     `);
+    
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_heartbeats_timestamp 
+      ON heartbeats(timestamp DESC)
+    `);
+    
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_license_bindings_device 
+      ON license_bindings(device_hash)
+    `);
+
+    // Create test license if it doesn't exist
+    const testLicenseExists = await client.query('SELECT id FROM licenses WHERE key = $1', ['SYNC-TEST-123']);
+    if (testLicenseExists.rowCount === 0) {
+      await client.query(
+        'INSERT INTO licenses (key, status, max_devices, customer_email) VALUES ($1, $2, $3, $4)',
+        ['SYNC-TEST-123', 'active', 10, 'test@example.com']
+      );
+      console.log('✅ Test license created: SYNC-TEST-123');
+    }
 
     // Create test user if it doesn't exist
-const testUserExists = await client.query('SELECT id FROM users WHERE email = $1', ['test@example.com']);
-if (testUserExists.rowCount === 0) {
-  const hashedPassword = await bcrypt.hash('password123', 10);
-  
-  // Check if name column exists
-  const nameColumnExists = await client.query(`
-    SELECT 1 FROM information_schema.columns 
-    WHERE table_name='users' AND column_name='name'
-  `);
-  
-  if (nameColumnExists.rowCount > 0) {
-    // Users table has name column
-    await client.query(
-      'INSERT INTO users (email, password, pw_hash, name) VALUES ($1, $2, $3, $4)',
-      ['test@example.com', 'password123', hashedPassword, 'Test User']
-    );
-  } else {
-    // Users table doesn't have name column
-    await client.query(
-      'INSERT INTO users (email, password, pw_hash) VALUES ($1, $2, $3)',
-      ['test@example.com', 'password123', hashedPassword]
-    );
-  }
-  console.log('✅ Test user created: test@example.com / password123');
-}
-
+    const testUserExists = await client.query('SELECT id FROM users WHERE email = $1', ['test@example.com']);
+    if (testUserExists.rowCount === 0) {
+      const hashedPassword = await bcrypt.hash('password123', 10);
+      await client.query(
+        'INSERT INTO users (email, password, pw_hash) VALUES ($1, $2, $3)',
+        ['test@example.com', 'password123', hashedPassword]
+      );
+      console.log('✅ Test user created: test@example.com / password123');
+    }
 
     console.log('✅ Database schema setup complete!');
-    
-  } catch (err) {
-    console.error('❌ Error during schema setup:', err);
+  } catch (error) {
+    console.error('❌ Error during schema setup:', error);
   } finally {
     client.release();
   }
 }
 
-// Initialize database schema on startup
+// Initialize database on startup
 ensureSchema();
 
-// Event normalization catalog
-const eventCatalog = {
-  // Sync Status Events
-  'sync_status_check': { status: 'ok', eventType: 'sync_status_check' },
-  'sync_healthy': { status: 'ok', eventType: 'sync_status_check' },
-  'sync_running': { status: 'ok', eventType: 'sync_status_check' },
-  'sync_up_to_date': { status: 'ok', eventType: 'sync_status_check' },
-  
-  // Pause Events
-  'sync_paused': { status: 'warn', eventType: 'sync_paused' },
-  'sync_stopped': { status: 'warn', eventType: 'sync_paused' },
-  'pause_detected': { status: 'warn', eventType: 'sync_paused' },
-  'onedrive_paused': { status: 'warn', eventType: 'sync_paused' },
-  
-  // Error Events
-  'sync_error': { status: 'error', eventType: 'sync_error' },
-  'sync_failed': { status: 'error', eventType: 'sync_error' },
-  'auth_error': { status: 'error', eventType: 'sync_error' },
-  'storage_error': { status: 'error', eventType: 'sync_error' },
-  'connectivity_error': { status: 'error', eventType: 'sync_error' },
-  'process_error': { status: 'error', eventType: 'sync_error' },
-  
-  // Process Events
-  'process_running': { status: 'ok', eventType: 'sync_status_check' },
-  'process_healthy': { status: 'ok', eventType: 'sync_status_check' },
-  'process_warning': { status: 'warn', eventType: 'sync_status_check' },
-  'process_critical': { status: 'error', eventType: 'sync_error' },
-  
-  // Authentication Events
-  'auth_ok': { status: 'ok', eventType: 'sync_status_check' },
-  'auth_warning': { status: 'warn', eventType: 'sync_status_check' },
-  'auth_critical': { status: 'error', eventType: 'sync_error' },
-  
-  // Storage Events
-  'storage_ok': { status: 'ok', eventType: 'sync_status_check' },
-  'storage_warning': { status: 'warn', eventType: 'sync_status_check' },
-  'storage_critical': { status: 'error', eventType: 'sync_error' },
-  
-  // Performance Events
-  'performance_ok': { status: 'ok', eventType: 'sync_status_check' },
-  'performance_warning': { status: 'warn', eventType: 'sync_status_check' },
-  'performance_critical': { status: 'error', eventType: 'sync_error' },
-  
-  // Connectivity Events
-  'connectivity_ok': { status: 'ok', eventType: 'sync_status_check' },
-  'connectivity_warning': { status: 'warn', eventType: 'sync_status_check' },
-  'connectivity_critical': { status: 'error', eventType: 'sync_error' },
-  
-  // Power/System Events
-  'device_asleep': { status: 'ok', eventType: 'sync_status_check' },
-  'device_offline': { status: 'ok', eventType: 'sync_status_check' },
-  'device_shutdown': { status: 'ok', eventType: 'sync_status_check' },
-  'device_hibernating': { status: 'ok', eventType: 'sync_status_check' }
-};
-
-function normalizeEvent(eventType, status) {
-  const normalized = eventCatalog[eventType];
-  if (normalized) {
-    return normalized;
-  }
-  
-  // Fallback normalization based on status
-  if (status === 'error') {
-    return { status: 'error', eventType: 'sync_error' };
-  } else if (status === 'warn') {
-    return { status: 'warn', eventType: 'sync_status_check' };
+// Authentication middleware
+function requireAuth(req, res, next) {
+  if (req.session.userId) {
+    next();
   } else {
-    return { status: 'ok', eventType: 'sync_status_check' };
+    res.status(401).json({ error: 'Authentication required' });
   }
 }
 
+// Routes
+
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Heartbeat endpoint with license validation
+// Authentication routes
+app.post('/api/register', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password required' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const result = await pool.query(
+      'INSERT INTO users (email, password, pw_hash) VALUES ($1, $2, $3) RETURNING id, email',
+      [email, password, hashedPassword]
+    );
+
+    req.session.userId = result.rows[0].id;
+    res.json({ user: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23505') {
+      res.status(400).json({ error: 'Email already exists' });
+    } else {
+      res.status(500).json({ error: 'Registration failed' });
+    }
+  }
+});
+
+app.post('/api/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (result.rowCount === 0) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const user = result.rows[0];
+    const validPassword = await bcrypt.compare(password, user.pw_hash || user.password);
+    
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    req.session.userId = user.id;
+    res.json({ user: { id: user.id, email: user.email } });
+  } catch (error) {
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+app.post('/api/logout', (req, res) => {
+  req.session.destroy();
+  res.json({ message: 'Logged out successfully' });
+});
+
+app.get('/api/me', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, email FROM users WHERE id = $1', [req.session.userId]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({ user: result.rows[0] });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get user info' });
+  }
+});
+
+// Heartbeat endpoint
 app.post('/api/heartbeat', async (req, res) => {
   try {
     const { licenseKey, deviceHash, status, eventType, message, timestamp } = req.body;
-    
-    // Validate required fields
-    if (!licenseKey || !deviceHash || !status || !eventType) {
-      return res.status(400).json({ 
-        error: 'Missing required fields: licenseKey, deviceHash, status, eventType' 
-      });
+
+    if (!licenseKey || !deviceHash || !status) {
+      return res.status(400).json({ error: 'Missing required fields' });
     }
-    
-    const client = await pool.connect();
-    try {
-      // Validate license
-      const L = await client.query('select id, status, max_devices from licenses where key=$1', [licenseKey]);
-      if (L.rowCount === 0) {
-        return res.status(401).json({ error: 'Invalid or inactive license key' });
-      }
-      if (L.rows[0].status !== 'active') {
-        return res.status(403).json({ error: 'License is not active' });
-      }
-      
-      // Check if device is already bound to this license
-      const bound = await client.query(
-        'select license_id from license_bindings where license_id=$1 and device_hash=$2 limit 1',
-        [L.rows[0].id, deviceHash]
+
+    // Validate license
+    const licenseResult = await pool.query(
+      'SELECT id, status, max_devices FROM licenses WHERE key = $1',
+      [licenseKey]
+    );
+
+    if (licenseResult.rowCount === 0) {
+      return res.status(401).json({ error: 'Invalid license key' });
+    }
+
+    const license = licenseResult.rows[0];
+    if (license.status !== 'active') {
+      return res.status(403).json({ error: 'License is not active' });
+    }
+
+    // Check if device is already bound
+    const bindingResult = await pool.query(
+      'SELECT license_id FROM license_bindings WHERE license_id = $1 AND device_hash = $2',
+      [license.id, deviceHash]
+    );
+
+    if (bindingResult.rowCount === 0) {
+      // Check device limit
+      const deviceCountResult = await pool.query(
+        'SELECT COUNT(*) as count FROM license_bindings WHERE license_id = $1',
+        [license.id]
       );
-      
-      if (bound.rowCount === 0) {
-        // Check device count for this license
-        const cnt = await client.query(
-          'select count(*) as c from license_bindings where license_id=$1',
-          [L.rows[0].id]
-        );
-        
-        if (cnt.rows[0].c >= (L.rows[0].max_devices || 1)) {
-          return res.status(403).json({ error: 'Seat limit reached' });
-        }
-        
-        // Bind device to license
-        await client.query(
-          'insert into license_bindings (license_id, device_hash) values ($1, $2)',
-          [L.rows[0].id, deviceHash]
-        );
+
+      const deviceCount = parseInt(deviceCountResult.rows[0].count);
+      if (deviceCount >= (license.max_devices || 1)) {
+        return res.status(403).json({ error: 'Device limit reached for this license' });
       }
-      
-      // Normalize event
-      const normalized = normalizeEvent(eventType, status);
-      
-      // Store heartbeat
-      await client.query(`
-        insert into heartbeats (license_id, device_hash, status, event_type, message, raw_data, created_at)
-        values ($1, $2, $3, $4, $5, $6, now())
-      `, [L.rows[0].id, deviceHash, normalized.status, normalized.eventType, message || '', req.body]);
-      
-      res.json({ 
-        ok: true, 
-        normalized: normalized
-      });
-      
-    } finally {
-      client.release();
+
+      // Bind new device
+      await pool.query(
+        'INSERT INTO license_bindings (license_id, device_hash) VALUES ($1, $2)',
+        [license.id, deviceHash]
+      );
     }
-    
+
+    // Normalize the event
+    const normalized = normalizeEvent(status, eventType);
+
+    // Insert heartbeat
+    await pool.query(
+      'INSERT INTO heartbeats (license_id, device_hash, status, event_type, message, timestamp) VALUES ($1, $2, $3, $4, $5, $6)',
+      [license.id, deviceHash, normalized.status, normalized.eventType, message, timestamp || new Date()]
+    );
+
+    res.json({ 
+      ok: true, 
+      normalized: normalized
+    });
   } catch (error) {
     console.error('Heartbeat error:', error);
     res.status(500).json({ error: error.message });
@@ -317,253 +370,143 @@ app.post('/api/heartbeat', async (req, res) => {
 // Offline heartbeat endpoint
 app.post('/api/heartbeat/offline', async (req, res) => {
   try {
-    const { licenseKey, deviceHash, reason } = req.body;
-    
+    const { licenseKey, deviceHash, message } = req.body;
+
     if (!licenseKey || !deviceHash) {
-      return res.status(400).json({ error: 'Missing licenseKey or deviceHash' });
+      return res.status(400).json({ error: 'Missing required fields' });
     }
-    
-    const client = await pool.connect();
-    try {
-      // Validate license
-      const L = await client.query('select id, status from licenses where key=$1', [licenseKey]);
-      if (L.rowCount === 0 || L.rows[0].status !== 'active') {
-        return res.status(401).json({ error: 'Invalid or inactive license key' });
-      }
-      
-      // Store offline heartbeat
-      await client.query(`
-        insert into heartbeats (license_id, device_hash, status, event_type, message, raw_data, created_at)
-        values ($1, $2, 'ok', 'sync_status_check', $3, $4, now())
-      `, [L.rows[0].id, deviceHash, reason || 'Device going offline', { ...req.body, offline: true }]);
-      
-      res.json({ ok: true, message: 'Offline heartbeat recorded' });
-      
-    } finally {
-      client.release();
+
+    // Validate license
+    const licenseResult = await pool.query(
+      'SELECT id FROM licenses WHERE key = $1 AND status = $2',
+      [licenseKey, 'active']
+    );
+
+    if (licenseResult.rowCount === 0) {
+      return res.status(401).json({ error: 'Invalid or inactive license' });
     }
-    
+
+    const license = licenseResult.rows[0];
+
+    // Insert offline heartbeat
+    await pool.query(
+      'INSERT INTO heartbeats (license_id, device_hash, status, event_type, message) VALUES ($1, $2, $3, $4, $5)',
+      [license.id, deviceHash, 'error', 'sync_error', message || 'Device went offline']
+    );
+
+    res.json({ ok: true });
   } catch (error) {
     console.error('Offline heartbeat error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get heartbeats for a license
-app.get('/api/heartbeats', async (req, res) => {
+// Get devices for a license
+app.get('/api/devices/:licenseKey', async (req, res) => {
   try {
-    const { licenseKey } = req.query;
-    
-    if (!licenseKey) {
-      return res.status(400).json({ error: 'licenseKey parameter required' });
+    const { licenseKey } = req.params;
+
+    const result = await pool.query(`
+      SELECT 
+        l.key as license_key,
+        l.max_devices,
+        json_agg(
+          json_build_object(
+            'license_id', lb.license_id,
+            'device_hash', lb.device_hash,
+            'bound_at', lb.bound_at
+          )
+        ) as devices
+      FROM licenses l
+      LEFT JOIN license_bindings lb ON l.id = lb.license_id
+      WHERE l.key = $1
+      GROUP BY l.id, l.key, l.max_devices
+    `, [licenseKey]);
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'License not found' });
     }
-    
-    const client = await pool.connect();
-    try {
-      // Validate license
-      const L = await client.query('select id from licenses where key=$1', [licenseKey]);
-      if (L.rowCount === 0) {
-        return res.status(401).json({ error: 'Invalid license key' });
-      }
-      
-      // Get latest heartbeat for each device
-      const result = await client.query(`
-        select distinct on (lb.device_hash)
-          lb.device_hash,
-          lb.device_hash as device_name,
-          h.status as last_status,
-          h.event_type as last_event_type,
-          h.message as last_message,
-          h.created_at as last_seen,
-          'active' as device_status,
-          null as grace_period_start,
-          case 
-            when h.status = 'error' then 'error'
-            when h.status = 'warn' then 'warn'
-            else 'ok'
-          end as display_status
-        from license_bindings lb
-        left join heartbeats h on lb.license_id = h.license_id and lb.device_hash = h.device_hash
-        where lb.license_id = $1
-        order by lb.device_hash, h.created_at desc
-      `, [L.rows[0].id]);
-      
-      res.json({ devices: result.rows });
-      
-    } finally {
-      client.release();
-    }
-    
+
+    const data = result.rows[0];
+    res.json({
+      licenseKey: data.license_key,
+      maxDevices: data.max_devices,
+      devices: data.devices[0].license_id ? data.devices : []
+    });
   } catch (error) {
-    console.error('Heartbeats error:', error);
+    console.error('Get devices error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Authentication routes
-app.post('/api/auth/register', async (req, res) => {
+// Get heartbeats for dashboard
+app.get('/api/heartbeats', async (req, res) => {
   try {
-    const { email, password } = req.body;
-    
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password required' });
+    const { licenseKey, limit = 100 } = req.query;
+
+    if (!licenseKey) {
+      return res.status(400).json({ error: 'License key required' });
     }
-    
-    const client = await pool.connect();
-    try {
-      // Check if user already exists
-      const existingUser = await client.query('SELECT id FROM users WHERE email = $1', [email]);
-      if (existingUser.rowCount > 0) {
-        return res.status(409).json({ error: 'User already exists' });
-      }
-      
-      // Hash password
-      const hashedPassword = await bcrypt.hash(password, 10);
-      
-      // Create user
-      const result = await client.query(
-        'INSERT INTO users (email, password, pw_hash) VALUES ($1, $2, $3) RETURNING id, email, created_at',
-        [email, password, hashedPassword]
-      );
-      
-      const user = result.rows[0];
-      req.session.userId = user.id;
-      req.session.userEmail = user.email;
-      
-      res.json({ 
-        ok: true, 
-        user: { id: user.id, email: user.email, created_at: user.created_at }
-      });
-      
-    } finally {
-      client.release();
-    }
-    
+
+    const result = await pool.query(`
+      SELECT DISTINCT ON (h.device_hash)
+        h.device_hash,
+        h.device_hash as device_name,
+        h.status as last_status,
+        h.event_type as last_event_type,
+        h.message as last_message,
+        h.timestamp as last_seen,
+        'active' as device_status,
+        null as grace_period_start,
+        h.status as display_status
+      FROM heartbeats h
+      JOIN licenses l ON h.license_id = l.id
+      WHERE l.key = $1
+      ORDER BY h.device_hash, h.timestamp DESC
+      LIMIT $2
+    `, [licenseKey, limit]);
+
+    res.json({ devices: result.rows });
   } catch (error) {
-    console.error('Registration error:', error);
-    res.status(500).json({ error: 'Registration failed' });
+    console.error('Get heartbeats error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+// Get licenses (for dashboard)
+app.get('/api/licenses', requireAuth, async (req, res) => {
   try {
-    const { email, password } = req.body;
-    
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password required' });
-    }
-    
-    const client = await pool.connect();
-    try {
-      // Find user
-      const result = await client.query('SELECT id, email, pw_hash, created_at FROM users WHERE email = $1', [email]);
-      if (result.rowCount === 0) {
-        return res.status(401).json({ error: 'Invalid credentials' });
-      }
-      
-      const user = result.rows[0];
-      
-      // Verify password
-      const validPassword = await bcrypt.compare(password, user.pw_hash);
-      if (!validPassword) {
-        return res.status(401).json({ error: 'Invalid credentials' });
-      }
-      
-      // Set session
-      req.session.userId = user.id;
-      req.session.userEmail = user.email;
-      
-      res.json({ 
-        ok: true, 
-        user: { id: user.id, email: user.email, created_at: user.created_at }
-      });
-      
-    } finally {
-      client.release();
-    }
-    
+    const result = await pool.query(`
+      SELECT 
+        l.*,
+        COUNT(lb.device_hash) as device_count
+      FROM licenses l
+      LEFT JOIN license_bindings lb ON l.id = lb.license_id
+      GROUP BY l.id
+      ORDER BY l.created_at DESC
+    `);
+
+    res.json({ licenses: result.rows });
   } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ error: 'Login failed' });
-  }
-});
-
-app.post('/api/auth/logout', (req, res) => {
-  req.session.destroy((err) => {
-    if (err) {
-      return res.status(500).json({ error: 'Logout failed' });
-    }
-    res.json({ ok: true, message: 'Logged out successfully' });
-  });
-});
-
-app.get('/api/auth/me', (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
-  
-  res.json({ 
-    ok: true, 
-    user: { 
-      id: req.session.userId, 
-      email: req.session.userEmail 
-    }
-  });
-});
-
-// Get licenses
-app.get('/api/licenses', async (req, res) => {
-  try {
-    const client = await pool.connect();
-    try {
-      const result = await client.query(`
-        select 
-          l.key,
-          l.status,
-          l.max_devices,
-          l.customer_email,
-          l.created_at,
-          count(lb.device_hash) as active_devices
-        from licenses l
-        left join license_bindings lb on l.id = lb.license_id
-        group by l.id, l.key, l.status, l.max_devices, l.customer_email, l.created_at
-        order by l.created_at desc
-      `);
-      
-      res.json({ licenses: result.rows });
-      
-    } finally {
-      client.release();
-    }
-    
-  } catch (error) {
-    console.error('Licenses API error:', error);
+    console.error('Get licenses error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 // Dashboard stats
-app.get('/api/dashboard/stats', async (req, res) => {
+app.get('/api/dashboard/stats', requireAuth, async (req, res) => {
   try {
-    const client = await pool.connect();
-    try {
-      const stats = await client.query(`
-        select 
-          count(distinct l.id) as total_licenses,
-          count(distinct l.id) filter (where l.status = 'active') as active_licenses,
-          count(lb.device_hash) as total_devices,
-          count(h.id) as total_heartbeats
-        from licenses l
-        left join license_bindings lb on l.id = lb.license_id
-        left join heartbeats h on l.id = h.license_id
-      `);
-      
-      res.json(stats.rows[0]);
-      
-    } finally {
-      client.release();
-    }
-    
+    const [licensesResult, devicesResult, heartbeatsResult] = await Promise.all([
+      pool.query('SELECT COUNT(*) as count FROM licenses WHERE status = $1', ['active']),
+      pool.query('SELECT COUNT(*) as count FROM license_bindings'),
+      pool.query('SELECT COUNT(*) as count FROM heartbeats WHERE timestamp > NOW() - INTERVAL \'24 hours\'')
+    ]);
+
+    res.json({
+      activeLicenses: parseInt(licensesResult.rows[0].count),
+      totalDevices: parseInt(devicesResult.rows[0].count),
+      heartbeatsToday: parseInt(heartbeatsResult.rows[0].count)
+    });
   } catch (error) {
     console.error('Dashboard stats error:', error);
     res.status(500).json({ error: error.message });
@@ -572,6 +515,6 @@ app.get('/api/dashboard/stats', async (req, res) => {
 
 // Start server
 app.listen(port, '0.0.0.0', () => {
+  console.log(`🚀 SyncSure backend running on port ${port}`);
   console.log(`🌐 Server running on http://0.0.0.0:${port}`);
 });
-
