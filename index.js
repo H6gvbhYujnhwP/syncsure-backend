@@ -25,12 +25,13 @@ async function ensureSchema() {
   try {
     console.log('🔧 Setting up database schema...');
     
-    // Create the users table if it doesn't exist - using password for password
+    // Create the users table if it doesn't exist - matching existing structure
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id          BIGSERIAL PRIMARY KEY,
         email       TEXT NOT NULL UNIQUE,
         password    TEXT NOT NULL,
+        name        TEXT,
         created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
@@ -102,8 +103,8 @@ async function ensureSchema() {
     if (testUserExists.rows.length === 0) {
       const hashedPassword = await bcrypt.hash('password123', 10);
       await client.query(
-        'INSERT INTO users (email, password) VALUES ($1, $2)',
-        ['test@syncsure.com', hashedPassword]
+        'INSERT INTO users (email, password, name) VALUES ($1, $2, $3)',
+        ['test@syncsure.com', hashedPassword, 'Test User']
       );
       console.log('✅ Created test user: test@syncsure.com / password123');
     }
@@ -276,7 +277,7 @@ async function handleHeartbeatInsert(client, {
 app.post('/api/auth/register', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { email, password } = req.body;
+    const { email, password, name } = req.body;
     
     if (!email || !password) {
       return res.status(400).json({ message: 'Email and password required' });
@@ -291,10 +292,11 @@ app.post('/api/auth/register', async (req, res) => {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
     
-    // Create user
+    // Create user with name (use email prefix if no name provided)
+    const userName = name || email.split('@')[0];
     const result = await client.query(
-      'INSERT INTO users (email, password) VALUES ($1, $2) RETURNING id, email, created_at',
-      [email, hashedPassword]
+      'INSERT INTO users (email, password, name) VALUES ($1, $2, $3) RETURNING id, email, name, created_at',
+      [email, hashedPassword, userName]
     );
     
     const user = result.rows[0];
@@ -319,7 +321,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
     
     // Get user
-    const result = await client.query('SELECT id, email, password, created_at FROM users WHERE email = $1', [email]);
+    const result = await client.query('SELECT id, email, password, name, created_at FROM users WHERE email = $1', [email]);
     if (result.rows.length === 0) {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
@@ -353,7 +355,7 @@ app.get('/api/auth/me', async (req, res) => {
   
   const client = await pool.connect();
   try {
-    const result = await client.query('SELECT id, email, created_at FROM users WHERE id = $1', [req.session.userId]);
+    const result = await client.query('SELECT id, email, name, created_at FROM users WHERE id = $1', [req.session.userId]);
     if (result.rows.length === 0) {
       return res.status(401).json({ message: 'User not found' });
     }
