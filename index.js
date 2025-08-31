@@ -128,15 +128,32 @@ async function ensureSchema() {
     `);
 
     // Create test user if it doesn't exist
-    const testUserExists = await client.query('SELECT id FROM users WHERE email = $1', ['test@example.com']);
-    if (testUserExists.rowCount === 0) {
-      const hashedPassword = await bcrypt.hash('password123', 10);
-      await client.query(
-        'INSERT INTO users (email, password, pw_hash) VALUES ($1, $2, $3)',
-        ['test@example.com', 'password123', hashedPassword]
-      );
-      console.log('✅ Test user created: test@example.com / password123');
-    }
+const testUserExists = await client.query('SELECT id FROM users WHERE email = $1', ['test@example.com']);
+if (testUserExists.rowCount === 0) {
+  const hashedPassword = await bcrypt.hash('password123', 10);
+  
+  // Check if name column exists
+  const nameColumnExists = await client.query(`
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name='users' AND column_name='name'
+  `);
+  
+  if (nameColumnExists.rowCount > 0) {
+    // Users table has name column
+    await client.query(
+      'INSERT INTO users (email, password, pw_hash, name) VALUES ($1, $2, $3, $4)',
+      ['test@example.com', 'password123', hashedPassword, 'Test User']
+    );
+  } else {
+    // Users table doesn't have name column
+    await client.query(
+      'INSERT INTO users (email, password, pw_hash) VALUES ($1, $2, $3)',
+      ['test@example.com', 'password123', hashedPassword]
+    );
+  }
+  console.log('✅ Test user created: test@example.com / password123');
+}
+
 
     console.log('✅ Database schema setup complete!');
     
@@ -557,3 +574,4 @@ app.get('/api/dashboard/stats', async (req, res) => {
 app.listen(port, '0.0.0.0', () => {
   console.log(`🌐 Server running on http://0.0.0.0:${port}`);
 });
+
