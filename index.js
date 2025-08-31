@@ -318,7 +318,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
     
     // Get user
-    const result = await client.query('SELECT id, email, pw_hash, created_at FROM users WHERE email = $1', [email]);
+    const result = await client.query('SELECT id, email, password, created_at FROM users WHERE email = $1', [email]);
     if (result.rows.length === 0) {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
@@ -326,7 +326,7 @@ app.post('/api/auth/login', async (req, res) => {
     const user = result.rows[0];
     
     // Verify password
-    const isValid = await bcrypt.compare(password, user.pw_hash);
+    const isValid = await bcrypt.compare(password, user.password);
     if (!isValid) {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
@@ -335,7 +335,7 @@ app.post('/api/auth/login', async (req, res) => {
     req.session.userId = user.id;
     
     // Return user without password
-    const { pw_hash, ...userWithoutPassword } = user;
+    const { password: userPassword, ...userWithoutPassword } = user;
     res.json({ user: userWithoutPassword });
   } catch (error) {
     console.error('Login error:', error);
@@ -571,4 +571,5 @@ const PORT = parseInt(process.env.PORT || '5000', 10);
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 SyncSure Backend running on port ${PORT}`);
 });
+
 
