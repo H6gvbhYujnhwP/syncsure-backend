@@ -293,8 +293,7 @@ app.post('/api/auth/register', async (req, res) => {
     
     // Create user
     const result = await client.query(
-      'INSERT INTO users (email, pw_hash) VALUES ($1, $2) RETURNING id, email, created_at',
-      [email, hashedPassword]
+      'INSERT INTO users (email, password) VALUES ($1, $2) RETURNING id, email, created_at',
     );
     
     const user = result.rows[0];
@@ -572,3 +571,4 @@ const PORT = parseInt(process.env.PORT || '5000', 10);
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 SyncSure Backend running on port ${PORT}`);
 });
+
