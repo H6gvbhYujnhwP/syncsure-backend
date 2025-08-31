@@ -1,4 +1,4 @@
-// index.js - Complete SyncSure Backend with Device Management (Syntax Fixed)
+// index.js - Complete SyncSure Backend with Device Management + Migration Endpoint
 import express from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
@@ -965,6 +965,46 @@ app.post('/api/admin/run-device-management', async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || 'server error' });
+  }
+});
+
+// ---------- Database Migration Endpoint ----------
+app.post('/api/admin/migrate-database', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    console.log('🔧 Running database migration...');
+    
+    // Add missing columns to license_bindings
+    const columns = [
+      'ALTER TABLE license_bindings ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ DEFAULT NOW()',
+      'ALTER TABLE license_bindings ADD COLUMN IF NOT EXISTS device_name VARCHAR(255)',
+      'ALTER TABLE license_bindings ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT \'active\'',
+      'ALTER TABLE license_bindings ADD COLUMN IF NOT EXISTS grace_period_start TIMESTAMPTZ NULL',
+      'ALTER TABLE license_bindings ADD COLUMN IF NOT EXISTS offline_notification_sent BOOLEAN DEFAULT false',
+      'ALTER TABLE license_bindings ADD COLUMN IF NOT EXISTS cleanup_notification_sent BOOLEAN DEFAULT false'
+    ];
+    
+    for (const sql of columns) {
+      await client.query(sql);
+    }
+    
+    // Update existing records
+    await client.query('UPDATE license_bindings SET last_seen = NOW() WHERE last_seen IS NULL');
+    await client.query('UPDATE license_bindings SET device_name = device_hash WHERE device_name IS NULL');
+    await client.query('UPDATE license_bindings SET status = \'active\' WHERE status IS NULL');
+    
+    // Create indexes
+    await client.query('CREATE INDEX IF NOT EXISTS idx_license_bindings_last_seen ON license_bindings(last_seen)');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_license_bindings_status ON license_bindings(status)');
+    
+    console.log('✅ Database migration completed');
+    res.json({ ok: true, message: 'Database migration completed successfully' });
+    
+  } catch (error) {
+    console.error('❌ Migration error:', error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
   }
 });
 
