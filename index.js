@@ -33,9 +33,9 @@ app.use(session({
   }
 }));
 
-console.log('🚀 SyncSure Backend running on port', port);
+console.log('🚀 SyncSure backend running on port', port);
 
-// ---------- Ensure all tables exist and are correct ----------
+// ---------- Ensure users table exists and is correct ----------
 async function ensureSchema() {
   const client = await pool.connect();
   try {
@@ -82,7 +82,7 @@ async function ensureSchema() {
       );
     `);
 
-    // Create license_bindings table (simple version)
+    // Create license_bindings table
     await client.query(`
       CREATE TABLE IF NOT EXISTS license_bindings (
         license_id UUID NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
@@ -107,7 +107,7 @@ async function ensureSchema() {
       );
     `);
 
-    // Create basic indexes
+    // Create indexes
     await client.query('CREATE INDEX IF NOT EXISTS idx_licenses_key ON licenses(key);');
     await client.query('CREATE INDEX IF NOT EXISTS idx_license_bindings_license_id ON license_bindings(license_id);');
     await client.query('CREATE INDEX IF NOT EXISTS idx_license_bindings_device_hash ON license_bindings(device_hash);');
@@ -150,7 +150,7 @@ async function ensureSchema() {
 // Initialize database schema on startup
 ensureSchema();
 
-// ---------- Event Normalization ----------
+// Event normalization catalog
 const eventCatalog = {
   // Sync Status Events
   'sync_status_check': { status: 'ok', eventType: 'sync_status_check' },
@@ -221,36 +221,6 @@ function normalizeEvent(eventType, status) {
   }
 }
 
-// ---------- License Validation ----------
-async function validateLicense(licenseKey) {
-  const client = await pool.connect();
-  try {
-    const result = await client.query(
-      'SELECT id, status, max_devices, customer_email FROM licenses WHERE key = $1',
-      [licenseKey]
-    );
-    
-    if (result.rowCount === 0) {
-      return { valid: false, error: 'Invalid license key' };
-    }
-    
-    const license = result.rows[0];
-    
-    if (license.status !== 'active') {
-      return { valid: false, error: 'License is not active' };
-    }
-    
-    return { valid: true, license };
-  } catch (error) {
-    console.error('License validation error:', error);
-    return { valid: false, error: 'License validation failed' };
-  } finally {
-    client.release();
-  }
-}
-
-// ---------- API Routes ----------
-
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
@@ -268,37 +238,38 @@ app.post('/api/heartbeat', async (req, res) => {
       });
     }
     
-    // Validate license
-    const licenseValidation = await validateLicense(licenseKey);
-    if (!licenseValidation.valid) {
-      return res.status(401).json({ error: licenseValidation.error });
-    }
-    
-    const license = licenseValidation.license;
-    
     const client = await pool.connect();
     try {
+      // Validate license
+      const L = await client.query('select id, status, max_devices from licenses where key=$1', [licenseKey]);
+      if (L.rowCount === 0) {
+        return res.status(401).json({ error: 'Invalid or inactive license key' });
+      }
+      if (L.rows[0].status !== 'active') {
+        return res.status(403).json({ error: 'License is not active' });
+      }
+      
       // Check if device is already bound to this license
       const bound = await client.query(
-        'SELECT license_id FROM license_bindings WHERE license_id = $1 AND device_hash = $2 LIMIT 1',
-        [license.id, deviceHash]
+        'select license_id from license_bindings where license_id=$1 and device_hash=$2 limit 1',
+        [L.rows[0].id, deviceHash]
       );
       
       if (bound.rowCount === 0) {
         // Check device count for this license
         const cnt = await client.query(
-          'SELECT COUNT(*) as c FROM license_bindings WHERE license_id = $1',
-          [license.id]
+          'select count(*) as c from license_bindings where license_id=$1',
+          [L.rows[0].id]
         );
         
-        if (cnt.rows[0].c >= (license.max_devices || 1)) {
-          return res.status(403).json({ error: 'Device seat limit reached for this license' });
+        if (cnt.rows[0].c >= (L.rows[0].max_devices || 1)) {
+          return res.status(403).json({ error: 'Seat limit reached' });
         }
         
         // Bind device to license
         await client.query(
-          'INSERT INTO license_bindings (license_id, device_hash) VALUES ($1, $2)',
-          [license.id, deviceHash]
+          'insert into license_bindings (license_id, device_hash) values ($1, $2)',
+          [L.rows[0].id, deviceHash]
         );
       }
       
@@ -307,14 +278,13 @@ app.post('/api/heartbeat', async (req, res) => {
       
       // Store heartbeat
       await client.query(`
-        INSERT INTO heartbeats (license_id, device_hash, status, event_type, message, raw_data, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, NOW())
-      `, [license.id, deviceHash, normalized.status, normalized.eventType, message || '', req.body]);
+        insert into heartbeats (license_id, device_hash, status, event_type, message, raw_data, created_at)
+        values ($1, $2, $3, $4, $5, $6, now())
+      `, [L.rows[0].id, deviceHash, normalized.status, normalized.eventType, message || '', req.body]);
       
       res.json({ 
         ok: true, 
-        normalized: normalized,
-        license_info: `${licenseKey} (${license.customer_email})`
+        normalized: normalized
       });
       
     } finally {
@@ -336,21 +306,19 @@ app.post('/api/heartbeat/offline', async (req, res) => {
       return res.status(400).json({ error: 'Missing licenseKey or deviceHash' });
     }
     
-    // Validate license
-    const licenseValidation = await validateLicense(licenseKey);
-    if (!licenseValidation.valid) {
-      return res.status(401).json({ error: licenseValidation.error });
-    }
-    
-    const license = licenseValidation.license;
-    
     const client = await pool.connect();
     try {
+      // Validate license
+      const L = await client.query('select id, status from licenses where key=$1', [licenseKey]);
+      if (L.rowCount === 0 || L.rows[0].status !== 'active') {
+        return res.status(401).json({ error: 'Invalid or inactive license key' });
+      }
+      
       // Store offline heartbeat
       await client.query(`
-        INSERT INTO heartbeats (license_id, device_hash, status, event_type, message, raw_data, created_at)
-        VALUES ($1, $2, 'ok', 'sync_status_check', $3, $4, NOW())
-      `, [license.id, deviceHash, reason || 'Device going offline', { ...req.body, offline: true }]);
+        insert into heartbeats (license_id, device_hash, status, event_type, message, raw_data, created_at)
+        values ($1, $2, 'ok', 'sync_status_check', $3, $4, now())
+      `, [L.rows[0].id, deviceHash, reason || 'Device going offline', { ...req.body, offline: true }]);
       
       res.json({ ok: true, message: 'Offline heartbeat recorded' });
       
@@ -364,50 +332,7 @@ app.post('/api/heartbeat/offline', async (req, res) => {
   }
 });
 
-// Simple devices API
-app.get('/api/devices/:licenseKey', async (req, res) => {
-  try {
-    const { licenseKey } = req.params;
-    
-    // Validate license
-    const licenseValidation = await validateLicense(licenseKey);
-    if (!licenseValidation.valid) {
-      return res.status(401).json({ error: licenseValidation.error });
-    }
-    
-    const license = licenseValidation.license;
-    
-    const client = await pool.connect();
-    try {
-      // Get devices bound to this license
-      const result = await client.query(`
-        SELECT 
-          lb.license_id,
-          lb.device_hash,
-          lb.bound_at,
-          lb.device_hash as device_name
-        FROM license_bindings lb
-        WHERE lb.license_id = $1
-        ORDER BY lb.bound_at DESC
-      `, [license.id]);
-      
-      res.json({
-        licenseKey: licenseKey,
-        maxDevices: license.max_devices,
-        devices: result.rows
-      });
-      
-    } finally {
-      client.release();
-    }
-    
-  } catch (error) {
-    console.error('Devices API error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Simple heartbeats API
+// Get heartbeats for a license
 app.get('/api/heartbeats', async (req, res) => {
   try {
     const { licenseKey } = req.query;
@@ -416,35 +341,35 @@ app.get('/api/heartbeats', async (req, res) => {
       return res.status(400).json({ error: 'licenseKey parameter required' });
     }
     
-    // Validate license
-    const licenseValidation = await validateLicense(licenseKey);
-    if (!licenseValidation.valid) {
-      return res.status(401).json({ error: licenseValidation.error });
-    }
-    
-    const license = licenseValidation.license;
-    
     const client = await pool.connect();
     try {
+      // Validate license
+      const L = await client.query('select id from licenses where key=$1', [licenseKey]);
+      if (L.rowCount === 0) {
+        return res.status(401).json({ error: 'Invalid license key' });
+      }
+      
       // Get latest heartbeat for each device
       const result = await client.query(`
-        SELECT DISTINCT ON (lb.device_hash)
+        select distinct on (lb.device_hash)
           lb.device_hash,
           lb.device_hash as device_name,
           h.status as last_status,
           h.event_type as last_event_type,
           h.message as last_message,
           h.created_at as last_seen,
-          CASE 
-            WHEN h.status = 'error' THEN 'error'
-            WHEN h.status = 'warn' THEN 'warn'
-            ELSE 'ok'
-          END as display_status
-        FROM license_bindings lb
-        LEFT JOIN heartbeats h ON lb.license_id = h.license_id AND lb.device_hash = h.device_hash
-        WHERE lb.license_id = $1
-        ORDER BY lb.device_hash, h.created_at DESC
-      `, [license.id]);
+          'active' as device_status,
+          null as grace_period_start,
+          case 
+            when h.status = 'error' then 'error'
+            when h.status = 'warn' then 'warn'
+            else 'ok'
+          end as display_status
+        from license_bindings lb
+        left join heartbeats h on lb.license_id = h.license_id and lb.device_hash = h.device_hash
+        where lb.license_id = $1
+        order by lb.device_hash, h.created_at desc
+      `, [L.rows[0].id]);
       
       res.json({ devices: result.rows });
       
@@ -569,23 +494,23 @@ app.get('/api/auth/me', (req, res) => {
   });
 });
 
-// Licenses route
+// Get licenses
 app.get('/api/licenses', async (req, res) => {
   try {
     const client = await pool.connect();
     try {
       const result = await client.query(`
-        SELECT 
+        select 
           l.key,
           l.status,
           l.max_devices,
           l.customer_email,
           l.created_at,
-          COUNT(lb.device_hash) as active_devices
-        FROM licenses l
-        LEFT JOIN license_bindings lb ON l.id = lb.license_id
-        GROUP BY l.id, l.key, l.status, l.max_devices, l.customer_email, l.created_at
-        ORDER BY l.created_at DESC
+          count(lb.device_hash) as active_devices
+        from licenses l
+        left join license_bindings lb on l.id = lb.license_id
+        group by l.id, l.key, l.status, l.max_devices, l.customer_email, l.created_at
+        order by l.created_at desc
       `);
       
       res.json({ licenses: result.rows });
@@ -600,20 +525,20 @@ app.get('/api/licenses', async (req, res) => {
   }
 });
 
-// Dashboard stats route
+// Dashboard stats
 app.get('/api/dashboard/stats', async (req, res) => {
   try {
     const client = await pool.connect();
     try {
       const stats = await client.query(`
-        SELECT 
-          COUNT(DISTINCT l.id) as total_licenses,
-          COUNT(DISTINCT l.id) FILTER (WHERE l.status = 'active') as active_licenses,
-          COUNT(lb.device_hash) as total_devices,
-          COUNT(h.id) as total_heartbeats
-        FROM licenses l
-        LEFT JOIN license_bindings lb ON l.id = lb.license_id
-        LEFT JOIN heartbeats h ON l.id = h.license_id
+        select 
+          count(distinct l.id) as total_licenses,
+          count(distinct l.id) filter (where l.status = 'active') as active_licenses,
+          count(lb.device_hash) as total_devices,
+          count(h.id) as total_heartbeats
+        from licenses l
+        left join license_bindings lb on l.id = lb.license_id
+        left join heartbeats h on l.id = h.license_id
       `);
       
       res.json(stats.rows[0]);
