@@ -1,7 +1,7 @@
 {
-  "name": "syncsure-backend",
-  "version": "2.2.0",
-  "description": "SyncSure Backend API - Complete Replit Compatible",
+  "name": "syncsure-heartbeat-api",
+  "version": "3.0.0",
+  "description": "SyncSure High-Volume Heartbeat Processing API",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -11,12 +11,16 @@
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
-    "express-session": "^1.17.3",
-    "bcrypt": "^5.1.1",
-    "pg": "^8.11.3",
-    "uuid": "^9.0.1"
+    "pg": "^8.11.3"
   },
   "engines": {
     "node": ">=18.0.0"
-  }
+  },
+  "keywords": [
+    "syncsure",
+    "heartbeat",
+    "monitoring",
+    "onedrive",
+    "api"
+  ]
 }
