@@ -283,7 +283,9 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Authentication routes
+// Authentication routes - BOTH /api/ and /api/auth/ versions for compatibility
+
+// Original authentication routes (keeping for backward compatibility)
 app.post('/api/register', async (req, res) => {
   try {
     const { email, password, name } = req.body;
@@ -337,7 +339,72 @@ app.post('/api/logout', (req, res) => {
   res.json({ message: 'Logged out successfully' });
 });
 
-// FIXED: Changed from /api/me to /api/auth/me for Replit frontend compatibility
+app.get('/api/me', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, email, name FROM users WHERE id = $1', [req.session.userId]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({ user: result.rows[0] });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get user info' });
+  }
+});
+
+// NEW: /api/auth/ versions for Replit frontend compatibility
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { email, password, name } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password required' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const result = await pool.query(
+      'INSERT INTO users (email, password, name, pw_hash) VALUES ($1, $2, $3, $4) RETURNING id, email, name',
+      [email, password, name || 'SyncSure User', hashedPassword]
+    );
+
+    req.session.userId = result.rows[0].id;
+    res.json({ user: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23505') {
+      res.status(400).json({ error: 'Email already exists' });
+    } else {
+      res.status(500).json({ error: 'Registration failed' });
+    }
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (result.rowCount === 0) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const user = result.rows[0];
+    const validPassword = await bcrypt.compare(password, user.pw_hash || user.password);
+    
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    req.session.userId = user.id;
+    res.json({ user: { id: user.id, email: user.email, name: user.name } });
+  } catch (error) {
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  req.session.destroy();
+  res.json({ message: 'Logged out successfully' });
+});
+
 app.get('/api/auth/me', requireAuth, async (req, res) => {
   try {
     const result = await pool.query('SELECT id, email, name FROM users WHERE id = $1', [req.session.userId]);
@@ -608,6 +675,6 @@ app.listen(port, '0.0.0.0', () => {
   console.log(`🌐 Server running on http://0.0.0.0:${port}`);
   console.log(`📊 Replit-compatible schema with CORS fixes`);
   console.log(`✅ CORS enabled for: sync-sure-agents5.replit.app, syncsure.cloud`);
-  console.log(`✅ Authentication endpoint: /api/auth/me`);
+  console.log(`✅ Authentication endpoints: /api/auth/login, /api/auth/logout, /api/auth/me`);
   console.log(`✅ Heartbeats table: BIGSERIAL ID`);
 });
