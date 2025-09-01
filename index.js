@@ -15,7 +15,7 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Middleware - FIXED CORS for Replit domains
+// Middleware - CORS for all your domains
 app.use(cors({
   origin: [
     'http://localhost:3000', 
@@ -118,7 +118,7 @@ function normalizeEvent(status, eventType) {
   }
 }
 
-// Database schema setup - FIXED for Replit compatibility
+// Database schema setup - Replit compatible
 async function ensureSchema() {
   const client = await pool.connect();
   try {
@@ -173,7 +173,7 @@ async function ensureSchema() {
       )
     `);
 
-    // Heartbeats table - FIXED: BIGSERIAL instead of UUID for Replit compatibility
+    // Heartbeats table - BIGSERIAL for Replit compatibility
     await client.query(`
       CREATE TABLE IF NOT EXISTS heartbeats (
         id BIGSERIAL PRIMARY KEY,
@@ -214,7 +214,7 @@ async function ensureSchema() {
       )
     `);
 
-    // Create indexes - EXACT Replit indexes
+    // Create indexes
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_heartbeats_license_time 
       ON heartbeats(license_id, created_at DESC)
@@ -240,20 +240,20 @@ async function ensureSchema() {
     if (testLicenseExists.rowCount === 0) {
       await client.query(
         'INSERT INTO licenses (key, max_devices, status, customer_email) VALUES ($1, $2, $3, $4)',
-        ['SYNC-TEST-123', 10, 'active', 'test@example.com']
+        ['SYNC-TEST-123', 10, 'active', 'test@syncsure.com']
       );
       console.log('✅ Test license created: SYNC-TEST-123');
     }
 
-    // Create test user if it doesn't exist
-    const testUserExists = await client.query('SELECT id FROM users WHERE email = $1', ['test@example.com']);
+    // Create test user if it doesn't exist - CORRECTED EMAIL
+    const testUserExists = await client.query('SELECT id FROM users WHERE email = $1', ['test@syncsure.com']);
     if (testUserExists.rowCount === 0) {
       const hashedPassword = await bcrypt.hash('password123', 10);
       await client.query(
         'INSERT INTO users (email, password, name, pw_hash) VALUES ($1, $2, $3, $4)',
-        ['test@example.com', 'password123', 'Test User', hashedPassword]
+        ['test@syncsure.com', 'password123', 'Test User', hashedPassword]
       );
-      console.log('✅ Test user created: test@example.com / password123');
+      console.log('✅ Test user created: test@syncsure.com / password123');
     }
 
     console.log('✅ Replit-compatible database schema setup complete!');
@@ -283,9 +283,7 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Authentication routes - BOTH /api/ and /api/auth/ versions for compatibility
-
-// Original authentication routes (keeping for backward compatibility)
+// Original authentication routes (for backward compatibility)
 app.post('/api/register', async (req, res) => {
   try {
     const { email, password, name } = req.body;
@@ -351,7 +349,7 @@ app.get('/api/me', requireAuth, async (req, res) => {
   }
 });
 
-// NEW: /api/auth/ versions for Replit frontend compatibility
+// /api/auth/ versions for Replit frontend compatibility
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, name } = req.body;
@@ -417,7 +415,7 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
   }
 });
 
-// Heartbeat endpoint - UNCHANGED (your tool will work exactly the same)
+// Heartbeat endpoint - UNCHANGED (your tool continues working)
 app.post('/api/heartbeat', async (req, res) => {
   try {
     const { licenseKey, deviceHash, status, eventType, message, timestamp } = req.body;
@@ -491,7 +489,7 @@ app.post('/api/heartbeat', async (req, res) => {
   }
 });
 
-// Offline heartbeat endpoint - UNCHANGED
+// Offline heartbeat endpoint
 app.post('/api/heartbeat/offline', async (req, res) => {
   try {
     const { licenseKey, deviceHash, message } = req.body;
@@ -566,7 +564,7 @@ app.get('/api/devices/:licenseKey', async (req, res) => {
   }
 });
 
-// Get heartbeats for dashboard - Replit format
+// Get heartbeats for dashboard
 app.get('/api/heartbeats', async (req, res) => {
   try {
     const { licenseKey, limit = 100 } = req.query;
@@ -641,7 +639,7 @@ app.get('/api/dashboard/stats', requireAuth, async (req, res) => {
   }
 });
 
-// Stripe webhook for license creation (for .exe auto-licensing)
+// Stripe webhook for license creation
 app.post('/api/stripe/webhook', async (req, res) => {
   try {
     const event = req.body;
@@ -676,5 +674,6 @@ app.listen(port, '0.0.0.0', () => {
   console.log(`📊 Replit-compatible schema with CORS fixes`);
   console.log(`✅ CORS enabled for: sync-sure-agents5.replit.app, syncsure.cloud`);
   console.log(`✅ Authentication endpoints: /api/auth/login, /api/auth/logout, /api/auth/me`);
+  console.log(`✅ Test account: test@syncsure.com / password123`);
   console.log(`✅ Heartbeats table: BIGSERIAL ID`);
 });
