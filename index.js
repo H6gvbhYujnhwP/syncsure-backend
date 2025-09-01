@@ -113,71 +113,111 @@ function normalizeEvent(status, eventType) {
   }
 }
 
-// Database schema setup
+// Database schema setup - Replit Schema WITHOUT advanced device management
 async function ensureSchema() {
   const client = await pool.connect();
   try {
-    console.log('🔧 Setting up database schema...');
+    console.log('🔧 Setting up simple Replit-aligned database schema...');
     
-    // Create users table
+    // Users table - EXACT Replit schema
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        email VARCHAR(255) UNIQUE NOT NULL,
-        password VARCHAR(255) NOT NULL,
-        pw_hash VARCHAR(255),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        email TEXT NOT NULL UNIQUE,
+        password TEXT NOT NULL,
+        name TEXT NOT NULL DEFAULT 'SyncSure User',
+        stripe_customer_id TEXT,
+        stripe_subscription_id TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+        pw_hash TEXT NOT NULL DEFAULT 'migration_placeholder'
       )
     `);
 
-    // Create licenses table
+    // Licenses table - EXACT Replit schema
     await client.query(`
       CREATE TABLE IF NOT EXISTS licenses (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        key VARCHAR(255) UNIQUE NOT NULL,
-        status VARCHAR(50) DEFAULT 'active',
-        max_devices INTEGER DEFAULT 1,
-        customer_email VARCHAR(255),
-        stripe_customer_id VARCHAR(255),
-        stripe_subscription_id VARCHAR(255),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        key TEXT NOT NULL UNIQUE,
+        max_devices INTEGER NOT NULL DEFAULT 5,
+        status TEXT NOT NULL DEFAULT 'active',
+        customer_id TEXT,
+        created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT now() NOT NULL,
+        customer_email VARCHAR,
+        stripe_customer_id VARCHAR,
+        stripe_subscription_id VARCHAR,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+        expires_at TIMESTAMP WITH TIME ZONE,
+        notification_email VARCHAR,
+        email_notifications BOOLEAN DEFAULT true
       )
     `);
 
-    // Create license_bindings table (simple version)
+    // License bindings table - Replit schema but SIMPLE (no advanced management)
     await client.query(`
       CREATE TABLE IF NOT EXISTS license_bindings (
-        license_id UUID REFERENCES licenses(id) ON DELETE CASCADE,
-        device_hash VARCHAR(255) NOT NULL,
-        bound_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (license_id, device_hash)
+        id BIGSERIAL PRIMARY KEY,
+        license_id UUID NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+        device_hash TEXT NOT NULL,
+        bound_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+        device_name VARCHAR DEFAULT NULL,
+        status VARCHAR DEFAULT 'active',
+        grace_period_start TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+        offline_notification_sent BOOLEAN DEFAULT false,
+        cleanup_notification_sent BOOLEAN DEFAULT false,
+        last_seen TIMESTAMP WITH TIME ZONE DEFAULT now()
       )
     `);
 
-    // Create heartbeats table (simple version)
+    // Heartbeats table - EXACT Replit schema
     await client.query(`
       CREATE TABLE IF NOT EXISTS heartbeats (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        license_id UUID REFERENCES licenses(id) ON DELETE CASCADE,
-        device_hash VARCHAR(255) NOT NULL,
-        status VARCHAR(50) NOT NULL,
-        event_type VARCHAR(100) NOT NULL,
-        message TEXT,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        license_id UUID NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+        device_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        message TEXT NOT NULL,
+        error_detail JSONB,
+        timestamp TIMESTAMP WITHOUT TIME ZONE DEFAULT now() NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL
       )
     `);
 
-    // Create indexes for performance
+    // Alerts table - Replit schema (but won't be used for auto-management)
     await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_heartbeats_license_device 
-      ON heartbeats(license_id, device_hash)
+      CREATE TABLE IF NOT EXISTS alerts (
+        id BIGSERIAL PRIMARY KEY,
+        license_id UUID NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+        device_hash TEXT,
+        severity TEXT NOT NULL,
+        title TEXT NOT NULL,
+        detail TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+        resolved_at TIMESTAMP WITH TIME ZONE
+      )
+    `);
+
+    // Device management log table - Replit schema (but won't be used for auto-management)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS device_management_log (
+        id BIGSERIAL PRIMARY KEY,
+        license_id UUID NOT NULL,
+        device_hash VARCHAR NOT NULL,
+        action VARCHAR NOT NULL,
+        details TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL
+      )
+    `);
+
+    // Create indexes - EXACT Replit indexes
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_heartbeats_license_time 
+      ON heartbeats(license_id, created_at DESC)
     `);
     
     await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_heartbeats_timestamp 
-      ON heartbeats(timestamp DESC)
+      CREATE INDEX IF NOT EXISTS idx_heartbeats_device_time 
+      ON heartbeats(device_hash, created_at DESC)
     `);
     
     await client.query(`
@@ -185,12 +225,17 @@ async function ensureSchema() {
       ON license_bindings(device_hash)
     `);
 
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_license_bindings_license 
+      ON license_bindings(license_id)
+    `);
+
     // Create test license if it doesn't exist
     const testLicenseExists = await client.query('SELECT id FROM licenses WHERE key = $1', ['SYNC-TEST-123']);
     if (testLicenseExists.rowCount === 0) {
       await client.query(
-        'INSERT INTO licenses (key, status, max_devices, customer_email) VALUES ($1, $2, $3, $4)',
-        ['SYNC-TEST-123', 'active', 10, 'test@example.com']
+        'INSERT INTO licenses (key, max_devices, status, customer_email) VALUES ($1, $2, $3, $4)',
+        ['SYNC-TEST-123', 10, 'active', 'test@example.com']
       );
       console.log('✅ Test license created: SYNC-TEST-123');
     }
@@ -200,13 +245,13 @@ async function ensureSchema() {
     if (testUserExists.rowCount === 0) {
       const hashedPassword = await bcrypt.hash('password123', 10);
       await client.query(
-        'INSERT INTO users (email, password, pw_hash) VALUES ($1, $2, $3)',
-        ['test@example.com', 'password123', hashedPassword]
+        'INSERT INTO users (email, password, name, pw_hash) VALUES ($1, $2, $3, $4)',
+        ['test@example.com', 'password123', 'Test User', hashedPassword]
       );
       console.log('✅ Test user created: test@example.com / password123');
     }
 
-    console.log('✅ Database schema setup complete!');
+    console.log('✅ Simple Replit-aligned database schema setup complete!');
   } catch (error) {
     console.error('❌ Error during schema setup:', error);
   } finally {
@@ -236,7 +281,7 @@ app.get('/health', (req, res) => {
 // Authentication routes
 app.post('/api/register', async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, name } = req.body;
     
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password required' });
@@ -244,8 +289,8 @@ app.post('/api/register', async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      'INSERT INTO users (email, password, pw_hash) VALUES ($1, $2, $3) RETURNING id, email',
-      [email, password, hashedPassword]
+      'INSERT INTO users (email, password, name, pw_hash) VALUES ($1, $2, $3, $4) RETURNING id, email, name',
+      [email, password, name || 'SyncSure User', hashedPassword]
     );
 
     req.session.userId = result.rows[0].id;
@@ -276,7 +321,7 @@ app.post('/api/login', async (req, res) => {
     }
 
     req.session.userId = user.id;
-    res.json({ user: { id: user.id, email: user.email } });
+    res.json({ user: { id: user.id, email: user.email, name: user.name } });
   } catch (error) {
     res.status(500).json({ error: 'Login failed' });
   }
@@ -289,7 +334,7 @@ app.post('/api/logout', (req, res) => {
 
 app.get('/api/me', requireAuth, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, email FROM users WHERE id = $1', [req.session.userId]);
+    const result = await pool.query('SELECT id, email, name FROM users WHERE id = $1', [req.session.userId]);
     if (result.rowCount === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
@@ -299,7 +344,7 @@ app.get('/api/me', requireAuth, async (req, res) => {
   }
 });
 
-// Heartbeat endpoint
+// Heartbeat endpoint - SIMPLE device management
 app.post('/api/heartbeat', async (req, res) => {
   try {
     const { licenseKey, deviceHash, status, eventType, message, timestamp } = req.body;
@@ -325,26 +370,32 @@ app.post('/api/heartbeat', async (req, res) => {
 
     // Check if device is already bound
     const bindingResult = await pool.query(
-      'SELECT license_id FROM license_bindings WHERE license_id = $1 AND device_hash = $2',
+      'SELECT id, status FROM license_bindings WHERE license_id = $1 AND device_hash = $2',
       [license.id, deviceHash]
     );
 
     if (bindingResult.rowCount === 0) {
       // Check device limit
       const deviceCountResult = await pool.query(
-        'SELECT COUNT(*) as count FROM license_bindings WHERE license_id = $1',
-        [license.id]
+        'SELECT COUNT(*) as count FROM license_bindings WHERE license_id = $1 AND status = $2',
+        [license.id, 'active']
       );
 
       const deviceCount = parseInt(deviceCountResult.rows[0].count);
-      if (deviceCount >= (license.max_devices || 1)) {
+      if (deviceCount >= license.max_devices) {
         return res.status(403).json({ error: 'Device limit reached for this license' });
       }
 
-      // Bind new device
+      // Bind new device - SIMPLE binding (no advanced management)
       await pool.query(
-        'INSERT INTO license_bindings (license_id, device_hash) VALUES ($1, $2)',
-        [license.id, deviceHash]
+        'INSERT INTO license_bindings (license_id, device_hash, device_name, status, last_seen) VALUES ($1, $2, $3, $4, $5)',
+        [license.id, deviceHash, deviceHash, 'active', new Date()]
+      );
+    } else {
+      // Update existing binding - SIMPLE update (just last_seen)
+      await pool.query(
+        'UPDATE license_bindings SET last_seen = $1 WHERE license_id = $2 AND device_hash = $3',
+        [new Date(), license.id, deviceHash]
       );
     }
 
@@ -401,7 +452,7 @@ app.post('/api/heartbeat/offline', async (req, res) => {
   }
 });
 
-// Get devices for a license
+// Get devices for a license - SIMPLE format
 app.get('/api/devices/:licenseKey', async (req, res) => {
   try {
     const { licenseKey } = req.params;
@@ -414,7 +465,10 @@ app.get('/api/devices/:licenseKey', async (req, res) => {
           json_build_object(
             'license_id', lb.license_id,
             'device_hash', lb.device_hash,
-            'bound_at', lb.bound_at
+            'bound_at', lb.bound_at,
+            'device_name', COALESCE(lb.device_name, lb.device_hash),
+            'status', lb.status,
+            'last_seen', lb.last_seen
           )
         ) as devices
       FROM licenses l
@@ -439,7 +493,7 @@ app.get('/api/devices/:licenseKey', async (req, res) => {
   }
 });
 
-// Get heartbeats for dashboard
+// Get heartbeats for dashboard - Replit format (SIMPLE)
 app.get('/api/heartbeats', async (req, res) => {
   try {
     const { licenseKey, limit = 100 } = req.query;
@@ -451,18 +505,19 @@ app.get('/api/heartbeats', async (req, res) => {
     const result = await pool.query(`
       SELECT DISTINCT ON (h.device_hash)
         h.device_hash,
-        h.device_hash as device_name,
+        COALESCE(lb.device_name, h.device_hash) as device_name,
         h.status as last_status,
         h.event_type as last_event_type,
         h.message as last_message,
-        h.timestamp as last_seen,
-        'active' as device_status,
-        null as grace_period_start,
+        lb.last_seen,
+        lb.status as device_status,
+        lb.grace_period_start,
         h.status as display_status
       FROM heartbeats h
       JOIN licenses l ON h.license_id = l.id
+      LEFT JOIN license_bindings lb ON h.license_id = lb.license_id AND h.device_hash = lb.device_hash
       WHERE l.key = $1
-      ORDER BY h.device_hash, h.timestamp DESC
+      ORDER BY h.device_hash, h.created_at DESC
       LIMIT $2
     `, [licenseKey, limit]);
 
@@ -481,7 +536,7 @@ app.get('/api/licenses', requireAuth, async (req, res) => {
         l.*,
         COUNT(lb.device_hash) as device_count
       FROM licenses l
-      LEFT JOIN license_bindings lb ON l.id = lb.license_id
+      LEFT JOIN license_bindings lb ON l.id = lb.license_id AND lb.status = 'active'
       GROUP BY l.id
       ORDER BY l.created_at DESC
     `);
@@ -498,8 +553,8 @@ app.get('/api/dashboard/stats', requireAuth, async (req, res) => {
   try {
     const [licensesResult, devicesResult, heartbeatsResult] = await Promise.all([
       pool.query('SELECT COUNT(*) as count FROM licenses WHERE status = $1', ['active']),
-      pool.query('SELECT COUNT(*) as count FROM license_bindings'),
-      pool.query('SELECT COUNT(*) as count FROM heartbeats WHERE timestamp > NOW() - INTERVAL \'24 hours\'')
+      pool.query('SELECT COUNT(*) as count FROM license_bindings WHERE status = $1', ['active']),
+      pool.query('SELECT COUNT(*) as count FROM heartbeats WHERE created_at > NOW() - INTERVAL \'24 hours\'')
     ]);
 
     res.json({
@@ -513,8 +568,37 @@ app.get('/api/dashboard/stats', requireAuth, async (req, res) => {
   }
 });
 
+// Stripe webhook for license creation (for .exe auto-licensing)
+app.post('/api/stripe/webhook', async (req, res) => {
+  try {
+    const event = req.body;
+    
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      const quantity = session.line_items?.data[0]?.quantity || 5;
+      
+      // Generate unique license key
+      const licenseKey = `SYNC-${Math.random().toString(36).substr(2, 4).toUpperCase()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+      
+      // Create license with purchased device count
+      await pool.query(
+        'INSERT INTO licenses (key, max_devices, customer_email, stripe_customer_id, stripe_subscription_id) VALUES ($1, $2, $3, $4, $5)',
+        [licenseKey, quantity, session.customer_email, session.customer, session.subscription]
+      );
+      
+      console.log(`✅ License created via Stripe: ${licenseKey} for ${quantity} devices`);
+    }
+    
+    res.json({ received: true });
+  } catch (error) {
+    console.error('Stripe webhook error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Start server
 app.listen(port, '0.0.0.0', () => {
   console.log(`🚀 SyncSure backend running on port ${port}`);
   console.log(`🌐 Server running on http://0.0.0.0:${port}`);
+  console.log(`📊 Simple Replit-aligned schema (no advanced device management)`);
 });
