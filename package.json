@@ -1,7 +1,7 @@
 {
   "name": "syncsure-backend",
-  "version": "2.1.0",
-  "description": "SyncSure Backend API - Replit Frontend Compatible",
+  "version": "2.2.0",
+  "description": "SyncSure Backend API - Complete Replit Compatible",
   "main": "index.js",
   "type": "module",
   "scripts": {
