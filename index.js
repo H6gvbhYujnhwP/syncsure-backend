@@ -15,9 +15,14 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Middleware
+// Middleware - FIXED CORS for Replit domains
 app.use(cors({
-  origin: ['http://localhost:3000', 'https://syncsure-frontend.onrender.com'],
+  origin: [
+    'http://localhost:3000', 
+    'https://sync-sure-agents5.replit.app',
+    'https://syncsure.cloud',
+    'https://syncsure-frontend.onrender.com'
+  ],
   credentials: true
 }));
 
@@ -113,11 +118,11 @@ function normalizeEvent(status, eventType) {
   }
 }
 
-// Database schema setup - Replit Schema WITHOUT advanced device management
+// Database schema setup - FIXED for Replit compatibility
 async function ensureSchema() {
   const client = await pool.connect();
   try {
-    console.log('🔧 Setting up simple Replit-aligned database schema...');
+    console.log('🔧 Setting up Replit-compatible database schema...');
     
     // Users table - EXACT Replit schema
     await client.query(`
@@ -152,7 +157,7 @@ async function ensureSchema() {
       )
     `);
 
-    // License bindings table - Replit schema but SIMPLE (no advanced management)
+    // License bindings table - EXACT Replit schema
     await client.query(`
       CREATE TABLE IF NOT EXISTS license_bindings (
         id BIGSERIAL PRIMARY KEY,
@@ -168,10 +173,10 @@ async function ensureSchema() {
       )
     `);
 
-    // Heartbeats table - EXACT Replit schema
+    // Heartbeats table - FIXED: BIGSERIAL instead of UUID for Replit compatibility
     await client.query(`
       CREATE TABLE IF NOT EXISTS heartbeats (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        id BIGSERIAL PRIMARY KEY,
         license_id UUID NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
         device_hash TEXT NOT NULL,
         status TEXT NOT NULL,
@@ -183,7 +188,7 @@ async function ensureSchema() {
       )
     `);
 
-    // Alerts table - Replit schema (but won't be used for auto-management)
+    // Alerts table - EXACT Replit schema
     await client.query(`
       CREATE TABLE IF NOT EXISTS alerts (
         id BIGSERIAL PRIMARY KEY,
@@ -197,7 +202,7 @@ async function ensureSchema() {
       )
     `);
 
-    // Device management log table - Replit schema (but won't be used for auto-management)
+    // Device management log table - EXACT Replit schema
     await client.query(`
       CREATE TABLE IF NOT EXISTS device_management_log (
         id BIGSERIAL PRIMARY KEY,
@@ -251,7 +256,7 @@ async function ensureSchema() {
       console.log('✅ Test user created: test@example.com / password123');
     }
 
-    console.log('✅ Simple Replit-aligned database schema setup complete!');
+    console.log('✅ Replit-compatible database schema setup complete!');
   } catch (error) {
     console.error('❌ Error during schema setup:', error);
   } finally {
@@ -332,7 +337,8 @@ app.post('/api/logout', (req, res) => {
   res.json({ message: 'Logged out successfully' });
 });
 
-app.get('/api/me', requireAuth, async (req, res) => {
+// FIXED: Changed from /api/me to /api/auth/me for Replit frontend compatibility
+app.get('/api/auth/me', requireAuth, async (req, res) => {
   try {
     const result = await pool.query('SELECT id, email, name FROM users WHERE id = $1', [req.session.userId]);
     if (result.rowCount === 0) {
@@ -344,7 +350,7 @@ app.get('/api/me', requireAuth, async (req, res) => {
   }
 });
 
-// Heartbeat endpoint - SIMPLE device management
+// Heartbeat endpoint - UNCHANGED (your tool will work exactly the same)
 app.post('/api/heartbeat', async (req, res) => {
   try {
     const { licenseKey, deviceHash, status, eventType, message, timestamp } = req.body;
@@ -386,13 +392,13 @@ app.post('/api/heartbeat', async (req, res) => {
         return res.status(403).json({ error: 'Device limit reached for this license' });
       }
 
-      // Bind new device - SIMPLE binding (no advanced management)
+      // Bind new device
       await pool.query(
         'INSERT INTO license_bindings (license_id, device_hash, device_name, status, last_seen) VALUES ($1, $2, $3, $4, $5)',
         [license.id, deviceHash, deviceHash, 'active', new Date()]
       );
     } else {
-      // Update existing binding - SIMPLE update (just last_seen)
+      // Update existing binding
       await pool.query(
         'UPDATE license_bindings SET last_seen = $1 WHERE license_id = $2 AND device_hash = $3',
         [new Date(), license.id, deviceHash]
@@ -418,7 +424,7 @@ app.post('/api/heartbeat', async (req, res) => {
   }
 });
 
-// Offline heartbeat endpoint
+// Offline heartbeat endpoint - UNCHANGED
 app.post('/api/heartbeat/offline', async (req, res) => {
   try {
     const { licenseKey, deviceHash, message } = req.body;
@@ -452,7 +458,7 @@ app.post('/api/heartbeat/offline', async (req, res) => {
   }
 });
 
-// Get devices for a license - SIMPLE format
+// Get devices for a license
 app.get('/api/devices/:licenseKey', async (req, res) => {
   try {
     const { licenseKey } = req.params;
@@ -493,7 +499,7 @@ app.get('/api/devices/:licenseKey', async (req, res) => {
   }
 });
 
-// Get heartbeats for dashboard - Replit format (SIMPLE)
+// Get heartbeats for dashboard - Replit format
 app.get('/api/heartbeats', async (req, res) => {
   try {
     const { licenseKey, limit = 100 } = req.query;
@@ -600,5 +606,8 @@ app.post('/api/stripe/webhook', async (req, res) => {
 app.listen(port, '0.0.0.0', () => {
   console.log(`🚀 SyncSure backend running on port ${port}`);
   console.log(`🌐 Server running on http://0.0.0.0:${port}`);
-  console.log(`📊 Simple Replit-aligned schema (no advanced device management)`);
+  console.log(`📊 Replit-compatible schema with CORS fixes`);
+  console.log(`✅ CORS enabled for: sync-sure-agents5.replit.app, syncsure.cloud`);
+  console.log(`✅ Authentication endpoint: /api/auth/me`);
+  console.log(`✅ Heartbeats table: BIGSERIAL ID`);
 });
