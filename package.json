@@ -1,7 +1,7 @@
 {
   "name": "syncsure-backend",
-  "version": "1.0.0",
-  "description": "SyncSure Backend API",
+  "version": "2.0.0",
+  "description": "SyncSure Backend API - Replit Schema Aligned",
   "main": "index.js",
   "type": "module",
   "scripts": {
