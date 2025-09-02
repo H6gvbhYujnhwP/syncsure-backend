@@ -1,7 +1,7 @@
 {
   "name": "syncsure-heartbeat-api",
-  "version": "3.1.0",
-  "description": "SyncSure High-Volume Heartbeat Processing API with Device Management",
+  "version": "3.2.0",
+  "description": "SyncSure Heartbeat API with Render PostgreSQL Database",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -23,6 +23,6 @@
     "monitoring",
     "onedrive",
     "api",
-    "device-management"
+    "render-postgresql"
   ]
 }
