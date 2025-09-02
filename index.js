@@ -7,13 +7,16 @@ const { Pool } = pg;
 const app = express();
 const port = process.env.PORT || 10000;
 
-// Database connection
+// Database connection with Render PostgreSQL optimizations
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
 });
 
-// CORS - Allow all origins for tool access (tools don't have CORS restrictions)
+// CORS - Optimized for Replit frontend
 app.use(cors({
   origin: [
     'http://localhost:3000',                    // Local development
@@ -34,7 +37,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Rate limiting for critical endpoints
+// Rate limiting for API protection
 const heartbeatLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 2, // 2 requests per minute per device
@@ -129,13 +132,13 @@ function normalizeEvent(status, eventType) {
   }
 }
 
-// Database schema setup - Enhanced schema with device management logging
+// Database schema setup - Render PostgreSQL optimized
 async function ensureSchema() {
   const client = await pool.connect();
   try {
-    console.log('🔧 Setting up heartbeat processing database schema...');
+    console.log('🔧 Setting up SyncSure database schema on Render PostgreSQL...');
     
-    // Licenses table - Basic license validation
+    // Licenses table
     await client.query(`
       CREATE TABLE IF NOT EXISTS licenses (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -148,7 +151,7 @@ async function ensureSchema() {
       )
     `);
 
-    // License bindings table - Device tracking
+    // License bindings table with all required columns
     await client.query(`
       CREATE TABLE IF NOT EXISTS license_bindings (
         id BIGSERIAL PRIMARY KEY,
@@ -163,7 +166,7 @@ async function ensureSchema() {
       )
     `);
 
-    // Heartbeats table - Status history
+    // Heartbeats table
     await client.query(`
       CREATE TABLE IF NOT EXISTS heartbeats (
         id BIGSERIAL PRIMARY KEY,
@@ -178,7 +181,7 @@ async function ensureSchema() {
       )
     `);
 
-    // Device management log table - NEW for audit trail
+    // Device management log table
     await client.query(`
       CREATE TABLE IF NOT EXISTS device_management_log (
         id BIGSERIAL PRIMARY KEY,
@@ -216,7 +219,6 @@ async function ensureSchema() {
       ON licenses(key)
     `);
 
-    // NEW: Index for device management log
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_device_management_log_license 
       ON device_management_log(license_id, created_at DESC)
@@ -232,7 +234,7 @@ async function ensureSchema() {
       console.log('✅ Test license created: SYNC-TEST-123');
     }
 
-    console.log('✅ Heartbeat processing database schema setup complete!');
+    console.log('✅ SyncSure database schema setup complete on Render PostgreSQL!');
   } catch (error) {
     console.error('❌ Error during schema setup:', error);
   } finally {
@@ -248,13 +250,14 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     service: 'syncsure-heartbeat-api',
-    version: '3.1.0',
+    version: '3.2.0',
+    database: 'render-postgresql',
     features: ['heartbeat-processing', 'device-management', 'manual-removal'],
     timestamp: new Date().toISOString() 
   });
 });
 
-// Main heartbeat endpoint - HIGH VOLUME PROCESSING
+// Main heartbeat endpoint
 app.post('/api/heartbeat', heartbeatLimiter, async (req, res) => {
   const startTime = Date.now();
   
@@ -290,7 +293,7 @@ app.post('/api/heartbeat', heartbeatLimiter, async (req, res) => {
     );
 
     if (bindingResult.rowCount === 0) {
-      // Check device limit before binding new device (exclude removed devices)
+      // Check device limit before binding new device
       const deviceCountResult = await pool.query(
         'SELECT COUNT(*) as count FROM license_bindings WHERE license_id = $1 AND status = $2',
         [license.id, 'active']
@@ -307,8 +310,8 @@ app.post('/api/heartbeat', heartbeatLimiter, async (req, res) => {
 
       // Bind new device
       await pool.query(
-        'INSERT INTO license_bindings (license_id, device_hash, device_name, status, last_seen) VALUES ($1, $2, $3, $4, $5)',
-        [license.id, deviceHash, deviceHash, 'active', new Date()]
+        'INSERT INTO license_bindings (license_id, device_hash, device_name, status, last_seen, updated_at) VALUES ($1, $2, $3, $4, $5, $6)',
+        [license.id, deviceHash, deviceHash, 'active', new Date(), new Date()]
       );
       
       console.log(`✅ New device bound: ${deviceHash} to license ${licenseKey}`);
@@ -323,7 +326,7 @@ app.post('/api/heartbeat', heartbeatLimiter, async (req, res) => {
         });
       }
 
-      // Update existing binding last_seen
+      // Update existing binding
       await pool.query(
         'UPDATE license_bindings SET last_seen = $1, updated_at = $2 WHERE license_id = $3 AND device_hash = $4',
         [new Date(), new Date(), license.id, deviceHash]
@@ -347,7 +350,8 @@ app.post('/api/heartbeat', heartbeatLimiter, async (req, res) => {
     res.json({ 
       ok: true, 
       normalized: normalized,
-      processing_time_ms: processingTime
+      processing_time_ms: processingTime,
+      database: 'render-postgresql'
     });
 
   } catch (error) {
@@ -361,7 +365,7 @@ app.post('/api/heartbeat', heartbeatLimiter, async (req, res) => {
   }
 });
 
-// NEW: Manual device removal endpoint
+// Manual device removal endpoint
 app.delete('/api/device/:licenseKey/:deviceHash', deviceManagementLimiter, async (req, res) => {
   const { licenseKey, deviceHash } = req.params;
   
@@ -393,7 +397,7 @@ app.delete('/api/device/:licenseKey/:deviceHash', deviceManagementLimiter, async
       return res.status(400).json({ error: 'Device is already removed' });
     }
     
-    // Remove device binding (soft delete - change status to 'removed')
+    // Remove device binding (soft delete)
     await pool.query(
       'UPDATE license_bindings SET status = $1, updated_at = $2 WHERE license_id = $3 AND device_hash = $4',
       ['removed', new Date(), licenseId, deviceHash]
@@ -441,7 +445,7 @@ app.post('/api/heartbeat/offline', async (req, res) => {
 
     const license = licenseResult.rows[0];
 
-    // Insert offline heartbeat (async)
+    // Insert offline heartbeat
     pool.query(
       'INSERT INTO heartbeats (license_id, device_hash, status, event_type, message) VALUES ($1, $2, $3, $4, $5)',
       [license.id, deviceHash, 'error', 'sync_error', message || 'Device went offline']
@@ -456,7 +460,7 @@ app.post('/api/heartbeat/offline', async (req, res) => {
   }
 });
 
-// Get heartbeat data for dashboard (used by Replit frontend) - UPDATED to exclude removed devices
+// Get heartbeat data for dashboard (exclude removed devices)
 app.get('/api/heartbeats', async (req, res) => {
   try {
     const { licenseKey, limit = 100 } = req.query;
@@ -465,7 +469,6 @@ app.get('/api/heartbeats', async (req, res) => {
       return res.status(400).json({ error: 'License key required' });
     }
 
-    // Get latest heartbeat for each device (exclude removed devices)
     const result = await pool.query(`
       SELECT DISTINCT ON (h.device_hash)
         h.device_hash,
@@ -501,7 +504,7 @@ app.get('/api/heartbeats', async (req, res) => {
   }
 });
 
-// Get device information for a specific license - UPDATED to exclude removed devices
+// Get device information for a specific license
 app.get('/api/devices/:licenseKey', async (req, res) => {
   try {
     const { licenseKey } = req.params;
@@ -553,7 +556,7 @@ app.get('/api/devices/:licenseKey', async (req, res) => {
   }
 });
 
-// License validation endpoint (for Replit to verify licenses)
+// License validation endpoint
 app.get('/api/license/:licenseKey/validate', async (req, res) => {
   try {
     const { licenseKey } = req.params;
@@ -603,7 +606,7 @@ app.get('/api/license/:licenseKey/validate', async (req, res) => {
   }
 });
 
-// NEW: Get device management log for audit trail
+// Get device management log
 app.get('/api/device-log/:licenseKey', async (req, res) => {
   try {
     const { licenseKey } = req.params;
@@ -634,7 +637,7 @@ app.get('/api/device-log/:licenseKey', async (req, res) => {
   }
 });
 
-// System stats endpoint (for monitoring)
+// System stats endpoint
 app.get('/api/stats', async (req, res) => {
   try {
     const [licensesResult, devicesResult, heartbeatsResult] = await Promise.all([
@@ -647,6 +650,7 @@ app.get('/api/stats', async (req, res) => {
       activeLicenses: parseInt(licensesResult.rows[0].count),
       activeDevices: parseInt(devicesResult.rows[0].count),
       heartbeatsLast24h: parseInt(heartbeatsResult.rows[0].count),
+      database: 'render-postgresql',
       timestamp: new Date().toISOString(),
       uptime: process.uptime()
     });
@@ -656,12 +660,13 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
-// 404 handler - UPDATED with new endpoints
+// 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({ 
     error: 'Endpoint not found',
     service: 'syncsure-heartbeat-api',
-    version: '3.1.0',
+    version: '3.2.0',
+    database: 'render-postgresql',
     available_endpoints: [
       'GET /health',
       'POST /api/heartbeat',
@@ -669,8 +674,8 @@ app.use('*', (req, res) => {
       'GET /api/heartbeats?licenseKey=X',
       'GET /api/devices/:licenseKey',
       'GET /api/license/:licenseKey/validate',
-      'DELETE /api/device/:licenseKey/:deviceHash (NEW)',
-      'GET /api/device-log/:licenseKey (NEW)',
+      'DELETE /api/device/:licenseKey/:deviceHash',
+      'GET /api/device-log/:licenseKey',
       'GET /api/stats'
     ]
   });
@@ -696,11 +701,12 @@ process.on('SIGTERM', () => {
 
 // Start server
 app.listen(port, '0.0.0.0', () => {
-  console.log(`🚀 SyncSure Heartbeat API v3.1.0 running on port ${port}`);
+  console.log(`🚀 SyncSure Heartbeat API v3.2.0 running on port ${port}`);
   console.log(`🌐 Server running on http://0.0.0.0:${port}`);
+  console.log(`🗄️ Database: Render PostgreSQL`);
   console.log(`📊 Optimized for high-volume heartbeat processing`);
   console.log(`✅ CORS enabled for Replit frontend access`);
   console.log(`🎯 Features: License validation, device binding, heartbeat processing, manual device removal`);
   console.log(`🔒 Rate limiting: Heartbeats (2/min), Device management (10/min)`);
-  console.log(`🗃️ Database: Enhanced schema with device management logging`);
+  console.log(`🗃️ Database: Complete schema with device management logging`);
 });
