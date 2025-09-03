@@ -1,18 +1,21 @@
 {
   "name": "syncsure-heartbeat-api",
   "version": "3.2.0",
-  "description": "SyncSure Heartbeat API with Render PostgreSQL Database",
+  "description": "SyncSure High-Volume Heartbeat Processing API with Device Management and Email Notifications",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "dev": "node --watch index.js"
+    "dev": "node --watch index.js",
+    "test": "node --test",
+    "test-email": "node -e \"import('./email-service.js').then(m => m.testEmailService().then(console.log))\""
   },
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
     "pg": "^8.11.3",
-    "express-rate-limit": "^7.1.5"
+    "express-rate-limit": "^7.1.5",
+    "resend": "^3.2.0"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -23,6 +26,15 @@
     "monitoring",
     "onedrive",
     "api",
-    "render-postgresql"
-  ]
+    "device-management",
+    "email-notifications",
+    "resend"
+  ],
+  "author": "SyncSure Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/syncsure/backend"
+  }
 }
+
