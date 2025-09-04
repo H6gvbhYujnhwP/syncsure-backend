@@ -1,25 +1,25 @@
 {
   "name": "syncsure-backend",
-  "version": "1.0.0",
-  "description": "SyncSure backend service for dashboard, API, and agent build integration.",
-  "main": "index.js",
+  "version": "1.1.0",
+  "description": "SyncSure backend (Render-only): API + worker for builds, licenses, Stripe webhooks, emails.",
   "type": "module",
+  "main": "index.js",
+  "engines": { "node": "20.x" },
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "test": "node --test"
+    "worker": "node worker.js",
+    "db:test": "node scripts/db-test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.18.2",
-    "express-rate-limit": "^7.1.5",
-    "pg": "^8.11.3"
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.1",
+    "node-fetch": "^3.3.2",
+    "pg": "^8.16.3",
+    "stripe": "^16.6.0"
   },
-  "engines": {
-    "node": "20.x"
-  },
-  "keywords": ["syncsure", "backend", "express", "api"],
-  "author": "SyncSure Team",
+  "keywords": ["syncsure", "backend", "express", "stripe", "github", "render"],
   "license": "MIT"
 }
 

@@ -1,42 +1,79 @@
-# SyncSure Backend
+# SyncSure Backend (Render-Only)
 
-This is the Render-only backend for SyncSure.
+Express API + Worker for licenses, Stripe webhooks, GitHub build automation, and email delivery.
 
-## Features
-- Express API with health route
-- PostgreSQL connection (via `pg`)
-- Ready for Render deployment with `render.yaml`
+## Services
+- Web API: `/api/health`, `/api/db/ping`, `/api/licenses`, `/api/stripe/webhook`
+- Background Worker: polls queued/building builds and handles email
 
-## Running locally
+## Environment Variables (Render)
+- DATABASE_URL (internal)
+- DATABASE_SSL=true
+- SESSION_SECRET
+- FRONTEND_ORIGIN (optional)
+- STRIPE_SECRET_KEY (optional)
+- STRIPE_WEBHOOK_SECRET (optional)
+- GITHUB_OWNER=H6gvbhYujnhwP
+- GITHUB_REPO=Syncsure_Tool
+- GITHUB_PAT
+- RESEND_API_KEY
+
+## Deploy (Render)
+- Build: `npm install`
+- Start (web): `npm start`
+- Start (worker): `npm run worker`
+
+## Health
+- `GET /api/health`
+- `GET /api/health/deep`
+- `GET /api/db/ping`
+
+## Licenses
+- `GET /api/licenses`
+- `POST /api/licenses` body: `{ "email":"user@x.com", "licenseKey":"KEY", "maxDevices":5 }`
+
+## Worker
+- Picks `builds.status='queued'` → triggers GH workflow
+- Polls `builds.status='building'` → reads release by tag → marks `released` → emails user
+
+## Local Dev
 ```bash
 npm install
-npm start
+npm start           # web
+npm run worker      # worker
+npm run db:test     # quick DB check
 ```
 
 ## Project Structure
 ```
 Syncsure-Backend/
-├── index.js
-├── package.json
-├── package-lock.json
-├── render.yaml
+├── index.js                 # Main Express server
+├── db.js                    # Database connection
+├── package.json             # Dependencies and scripts
+├── render.yaml              # Render deployment config
+├── .env.example             # Environment variables reference
+├── README.md                # This file
 ├── routes/
-│   └── health.js
-├── db/
-│   └── db-test.js
-└── README.md
+│   ├── health.js           # Health check endpoints
+│   ├── db.js               # Database ping endpoint
+│   ├── licenses.js         # License management
+│   └── stripe.js           # Stripe webhook handler
+├── services/
+│   ├── github.js           # GitHub API integration
+│   └── email.js            # Email service (Resend)
+├── worker.js               # Background worker
+├── scripts/
+│   └── db-test.js          # Database connection test
+└── sql/
+    └── schema.sql          # Database schema
 ```
 
-## Environment Variables
-- `DATABASE_URL` - PostgreSQL connection string
-- `DATABASE_SSL` - Set to "true" for SSL connections
-- `SESSION_SECRET` - Secret for session management
-- `PORT` - Server port (defaults to 10000)
+## Progress Status
 
-## API Endpoints
-- `GET /` - Root endpoint
-- `GET /api/health` - Health check endpoint
-
-## Deployment
-This project is configured for deployment on Render using the `render.yaml` file.
+With this scaffold checked in and live, you're ~**80%** of the way:
+- ✅ Backend API live
+- ✅ DB wired
+- ✅ Worker scaffolded (GitHub + email paths ready)
+- 🔜 Wire real Stripe handlers, finalize GitHub workflow file name, and validate release asset naming
+- 🔜 Hook frontend/dashboard to these endpoints
 
