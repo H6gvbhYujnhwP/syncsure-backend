@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: syncsure-backend
+    env: node
+    plan: standard
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_SSL
+        value: "true"
+      - key: SESSION_SECRET
+        sync: false
+

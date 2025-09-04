@@ -1,0 +1,25 @@
+{
+  "name": "syncsure-backend",
+  "version": "1.0.0",
+  "description": "SyncSure backend service for dashboard, API, and agent build integration.",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
+    "pg": "^8.11.3"
+  },
+  "engines": {
+    "node": "20.x"
+  },
+  "keywords": ["syncsure", "backend", "express", "api"],
+  "author": "SyncSure Team",
+  "license": "MIT"
+}
+
