@@ -1,6 +1,7 @@
 import { pool } from "./db.js";
 import { triggerWorkflow, latestReleaseByTag } from "./services/github.js";
-import { sendLicenseEmail } from "./services/email.js";
+import { sendLicenseEmail } from "./services/email.js"
+import { initializeDatabase } from "./scripts/deploy-init-db.js";
 
 const TICK_MS = 60_000; // 1 minute
 const WORKFLOW_FILE = process.env.GITHUB_WORKFLOW_FILE || "build-and-release.yml";
@@ -74,6 +75,27 @@ async function tick() {
   await processBuildingBuild();
 }
 
-setInterval(tick, TICK_MS);
+async function startWorker() {
+  try {
+    console.log("🔄 Starting SyncSure Worker...");
+    
+    // Initialize database schema
+    await initializeDatabase();
+    
+    // Start the worker loop
+    setInterval(tick, TICK_MS);
+    console.log("✅ SyncSure Worker started successfully");
+    console.log(`⏰ Worker tick interval: ${TICK_MS}ms`);
+    console.log(`📁 Workflow file: ${WORKFLOW_FILE}`);
+    
+    // Run first tick immediately
+    await tick();
+  } catch (error) {
+    console.error("❌ Failed to start worker:", error.message);
+    process.exit(1);
+  }
+}
+
+startWorker();(tick, TICK_MS);
 console.log("✅ worker started");
 
