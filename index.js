@@ -192,11 +192,12 @@ async function ensureSchema() {
     console.log('🔧 Setting up heartbeat processing database schema...');
     
     // Licenses table - Basic license validation
+    // UPDATED: Changed default from 5 to 1 to match new pricing model
     await client.query(`
       CREATE TABLE IF NOT EXISTS licenses (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         key TEXT NOT NULL UNIQUE,
-        max_devices INTEGER NOT NULL DEFAULT 5,
+        max_devices INTEGER NOT NULL DEFAULT 1,
         status TEXT NOT NULL DEFAULT 'active',
         customer_email VARCHAR,
         customer_name VARCHAR,
@@ -306,14 +307,14 @@ async function ensureSchema() {
       ADD COLUMN IF NOT EXISTS customer_name VARCHAR
     `);
 
-    // Create test license if it doesn't exist
+    // Create test license if it doesn't exist - UPDATED for new pricing model
     const testLicenseExists = await client.query('SELECT id FROM licenses WHERE key = $1', ['SYNC-TEST-123']);
     if (testLicenseExists.rowCount === 0) {
       await client.query(
         'INSERT INTO licenses (key, max_devices, status, customer_email, customer_name) VALUES ($1, $2, $3, $4, $5)',
-        ['SYNC-TEST-123', 10, 'active', 'test@syncsure.com', 'Test User']
+        ['SYNC-TEST-123', 25, 'active', 'test@syncsure.com', 'Test User'] // 25 devices for testing
       );
-      console.log('✅ Test license created: SYNC-TEST-123');
+      console.log('✅ Test license created: SYNC-TEST-123 (25 devices)');
     }
 
     console.log('✅ Heartbeat processing database schema setup complete!');
@@ -332,8 +333,13 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     service: 'syncsure-heartbeat-api',
-    version: '3.2.0',
-    features: ['heartbeat-processing', 'device-management', 'manual-removal', 'email-notifications'],
+    version: '3.3.0', // Updated version for new pricing model
+    features: ['heartbeat-processing', 'device-management', 'manual-removal', 'email-notifications', 'new-pricing-model'],
+    pricing_model: {
+      starter: { devices: '1-50', price_per_device: '£1.99' },
+      business: { devices: '51-500', price_per_device: '£1.49' },
+      enterprise: { devices: '500+', price_per_device: '£0.99' }
+    },
     timestamp: new Date().toISOString() 
   });
 });
@@ -456,60 +462,13 @@ app.post('/api/email/billing', emailLimiter, async (req, res) => {
   }
 });
 
-// Test email service
-app.post('/api/email/test', emailLimiter, async (req, res) => {
-  try {
-    const result = await emailService.testEmailService();
-    res.json(result);
-  } catch (error) {
-    console.error('Email test endpoint error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Get email log for a license
-app.get('/api/email-log/:licenseKey', async (req, res) => {
-  try {
-    const { licenseKey } = req.params;
-    const { limit = 50 } = req.query;
-
-    const result = await pool.query(`
-      SELECT 
-        el.customer_email,
-        el.email_type,
-        el.subject,
-        el.message_id,
-        el.status,
-        el.error_message,
-        el.created_at
-      FROM email_log el
-      LEFT JOIN licenses l ON el.license_id = l.id
-      WHERE l.key = $1 OR el.customer_email IN (
-        SELECT customer_email FROM licenses WHERE key = $1
-      )
-      ORDER BY el.created_at DESC
-      LIMIT $2
-    `, [licenseKey, limit]);
-
-    res.json({
-      licenseKey: licenseKey,
-      emails: result.rows,
-      total: result.rows.length,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error('❌ Email log error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Main heartbeat endpoint - HIGH VOLUME PROCESSING (ENHANCED with offline monitoring)
+// Heartbeat endpoint - Core functionality
 app.post('/api/heartbeat', heartbeatLimiter, async (req, res) => {
   const startTime = Date.now();
   
   try {
-    const { licenseKey, deviceHash, status, eventType, message, timestamp } = req.body;
-
+    const { licenseKey, deviceHash, status, eventType, message, deviceName } = req.body;
+    
     // Validate required fields
     if (!licenseKey || !deviceHash || !status) {
       return res.status(400).json({ 
@@ -517,9 +476,15 @@ app.post('/api/heartbeat', heartbeatLimiter, async (req, res) => {
       });
     }
 
-    // Get license with customer info for email alerts
+    // Normalize the event
+    const normalizedEvent = normalizeEvent(status, eventType);
+    const finalStatus = normalizedEvent.status;
+    const finalEventType = normalizedEvent.eventType;
+    const finalMessage = message || `Device ${deviceHash} status: ${finalStatus}`;
+
+    // Get license info
     const licenseResult = await pool.query(
-      'SELECT id, status, max_devices, customer_email, customer_name FROM licenses WHERE key = $1',
+      'SELECT id, max_devices, status, customer_email, customer_name FROM licenses WHERE key = $1',
       [licenseKey]
     );
 
@@ -532,466 +497,452 @@ app.post('/api/heartbeat', heartbeatLimiter, async (req, res) => {
       return res.status(403).json({ error: 'License is not active' });
     }
 
-    // Check/create device binding (exclude removed devices)
+    // Check device binding and seat availability
     const bindingResult = await pool.query(
-      'SELECT id, status, device_name FROM license_bindings WHERE license_id = $1 AND device_hash = $2',
+      'SELECT id, status FROM license_bindings WHERE license_id = $1 AND device_hash = $2',
       [license.id, deviceHash]
     );
 
+    let deviceBinding;
     if (bindingResult.rowCount === 0) {
-      // Check device limit before binding new device (exclude removed devices)
-      const deviceCountResult = await pool.query(
+      // New device - check seat availability
+      const activeDevicesResult = await pool.query(
         'SELECT COUNT(*) as count FROM license_bindings WHERE license_id = $1 AND status = $2',
         [license.id, 'active']
       );
 
-      const deviceCount = parseInt(deviceCountResult.rows[0].count);
-      if (deviceCount >= license.max_devices) {
+      const activeDeviceCount = parseInt(activeDevicesResult.rows[0].count);
+      if (activeDeviceCount >= license.max_devices) {
         return res.status(403).json({ 
-          error: 'Device limit reached for this license',
-          current_devices: deviceCount,
-          max_devices: license.max_devices
+          error: 'License seat limit exceeded',
+          maxDevices: license.max_devices,
+          currentDevices: activeDeviceCount
         });
       }
 
       // Bind new device
-      await pool.query(
-        'INSERT INTO license_bindings (license_id, device_hash, device_name, status, last_seen) VALUES ($1, $2, $3, $4, $5)',
-        [license.id, deviceHash, deviceHash, 'active', new Date()]
+      const newBindingResult = await pool.query(
+        'INSERT INTO license_bindings (license_id, device_hash, device_name, status, last_seen) VALUES ($1, $2, $3, $4, $5) RETURNING id, status',
+        [license.id, deviceHash, deviceName || null, 'active', new Date()]
       );
+      deviceBinding = newBindingResult.rows[0];
       
-      console.log(`✅ New device bound: ${deviceHash} to license ${licenseKey}`);
-      
-      // Schedule offline monitoring for new device
-      if (license.customer_email && license.customer_name) {
-        scheduleOfflineCheck(license.id, deviceHash, license.customer_email, license.customer_name, deviceHash);
-      }
+      console.log(`✅ New device bound: ${deviceHash} to license ${licenseKey} (${activeDeviceCount + 1}/${license.max_devices})`);
     } else {
-      const binding = bindingResult.rows[0];
+      deviceBinding = bindingResult.rows[0];
       
-      // Check if device was removed
-      if (binding.status === 'removed') {
-        return res.status(403).json({ 
-          error: 'Device has been removed from monitoring',
-          message: 'This device is no longer authorized. Please contact support if you need to re-enable monitoring.'
-        });
-      }
-
-      // Update existing binding last_seen
+      // Update last seen time
       await pool.query(
         'UPDATE license_bindings SET last_seen = $1, updated_at = $2 WHERE license_id = $3 AND device_hash = $4',
         [new Date(), new Date(), license.id, deviceHash]
       );
-      
-      // Reschedule offline monitoring
-      if (license.customer_email && license.customer_name) {
-        scheduleOfflineCheck(license.id, deviceHash, license.customer_email, license.customer_name, binding.device_name || deviceHash);
-      }
     }
 
-    // Normalize the event
-    const normalized = normalizeEvent(status, eventType);
-
-    // Insert heartbeat (async, don't wait)
-    pool.query(
+    // Record heartbeat
+    await pool.query(
       'INSERT INTO heartbeats (license_id, device_hash, status, event_type, message, timestamp) VALUES ($1, $2, $3, $4, $5, $6)',
-      [license.id, deviceHash, normalized.status, normalized.eventType, message || 'Heartbeat received', timestamp || new Date()]
-    ).catch(error => {
-      console.error('❌ Heartbeat insert error:', error);
-    });
+      [license.id, deviceHash, finalStatus, finalEventType, finalMessage, new Date()]
+    );
+
+    // Schedule offline check for this device
+    if (license.customer_email && license.customer_name) {
+      scheduleOfflineCheck(license.id, deviceHash, license.customer_email, license.customer_name, deviceName);
+    }
 
     const processingTime = Date.now() - startTime;
     
-    // Success response
-    res.json({ 
-      ok: true, 
-      normalized: normalized,
-      processing_time_ms: processingTime
+    res.json({
+      success: true,
+      deviceBinding: deviceBinding.status,
+      normalizedStatus: finalStatus,
+      normalizedEventType: finalEventType,
+      processingTimeMs: processingTime
     });
 
   } catch (error) {
+    console.error('Heartbeat processing error:', error);
     const processingTime = Date.now() - startTime;
-    console.error('❌ Heartbeat processing error:', error);
     
     res.status(500).json({ 
       error: 'Internal server error',
-      processing_time_ms: processingTime
+      processingTimeMs: processingTime
     });
   }
 });
 
-// Manual device removal endpoint (ENHANCED with email notification)
-app.delete('/api/device/:licenseKey/:deviceHash', deviceManagementLimiter, async (req, res) => {
-  const { licenseKey, deviceHash } = req.params;
-  
+// License validation endpoint
+app.post('/api/validate-license', async (req, res) => {
   try {
-    // Validate license exists and is active
-    const license = await pool.query(
-      'SELECT id, customer_email, customer_name FROM licenses WHERE key = $1 AND status = $2',
-      [licenseKey, 'active']
-    );
+    const { licenseKey } = req.body;
     
-    if (license.rows.length === 0) {
-      return res.status(404).json({ error: 'License not found' });
-    }
-    
-    const licenseData = license.rows[0];
-    const licenseId = licenseData.id;
-    
-    // Check if device binding exists
-    const binding = await pool.query(
-      'SELECT id, status, device_name FROM license_bindings WHERE license_id = $1 AND device_hash = $2',
-      [licenseId, deviceHash]
-    );
-    
-    if (binding.rows.length === 0) {
-      return res.status(404).json({ error: 'Device not found' });
+    if (!licenseKey) {
+      return res.status(400).json({ error: 'License key is required' });
     }
 
-    // Check if device is already removed
-    if (binding.rows[0].status === 'removed') {
-      return res.status(400).json({ error: 'Device is already removed' });
-    }
-    
-    const deviceName = binding.rows[0].device_name || deviceHash;
-    
-    // Remove device binding (soft delete - change status to 'removed')
-    await pool.query(
-      'UPDATE license_bindings SET status = $1, updated_at = $2 WHERE license_id = $3 AND device_hash = $4',
-      ['removed', new Date(), licenseId, deviceHash]
+    const result = await pool.query(
+      'SELECT id, max_devices, status, customer_email, customer_name FROM licenses WHERE key = $1',
+      [licenseKey]
     );
-    
-    // Log the removal action
-    await pool.query(
-      'INSERT INTO device_management_log (license_id, device_hash, action, details) VALUES ($1, $2, $3, $4)',
-      [licenseId, deviceHash, 'manual_removal', 'Device manually removed by customer']
-    );
-    
-    // Clear offline monitoring timer
-    const checkKey = `${licenseId}-${deviceHash}`;
-    if (deviceOfflineChecks.has(checkKey)) {
-      clearTimeout(deviceOfflineChecks.get(checkKey));
-      deviceOfflineChecks.delete(checkKey);
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'License not found' });
     }
+
+    const license = result.rows[0];
     
-    console.log(`✅ Device removed: ${deviceHash} from license ${licenseKey}`);
-    
-    res.json({ 
-      success: true, 
-      message: 'Device removed successfully',
-      deviceHash: deviceHash,
-      deviceName: deviceName,
-      licenseKey: licenseKey
+    // Get current device count
+    const deviceCountResult = await pool.query(
+      'SELECT COUNT(*) as count FROM license_bindings WHERE license_id = $1 AND status = $2',
+      [license.id, 'active']
+    );
+
+    const currentDevices = parseInt(deviceCountResult.rows[0].count);
+
+    res.json({
+      valid: license.status === 'active',
+      licenseId: license.id,
+      maxDevices: license.max_devices,
+      currentDevices: currentDevices,
+      availableSeats: license.max_devices - currentDevices,
+      status: license.status,
+      customerEmail: license.customer_email,
+      customerName: license.customer_name
     });
-    
+
   } catch (error) {
-    console.error('Device removal error:', error);
+    console.error('License validation error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Offline heartbeat endpoint
-app.post('/api/heartbeat/offline', async (req, res) => {
-  try {
-    const { licenseKey, deviceHash, message } = req.body;
+// Device management endpoints
 
-    if (!licenseKey || !deviceHash) {
-      return res.status(400).json({ error: 'Missing required fields: licenseKey, deviceHash' });
+// Get devices for a license
+app.get('/api/license/:licenseKey/devices', async (req, res) => {
+  try {
+    const { licenseKey } = req.params;
+    
+    const licenseResult = await pool.query(
+      'SELECT id, max_devices FROM licenses WHERE key = $1 AND status = $2',
+      [licenseKey, 'active']
+    );
+
+    if (licenseResult.rowCount === 0) {
+      return res.status(404).json({ error: 'License not found or inactive' });
     }
 
-    // Validate license
+    const license = licenseResult.rows[0];
+    
+    const devicesResult = await pool.query(`
+      SELECT 
+        device_hash,
+        device_name,
+        status,
+        bound_at,
+        last_seen,
+        EXTRACT(EPOCH FROM (now() - last_seen))/3600 as hours_since_last_seen
+      FROM license_bindings 
+      WHERE license_id = $1 
+      ORDER BY last_seen DESC
+    `, [license.id]);
+
+    res.json({
+      licenseKey,
+      maxDevices: license.max_devices,
+      devices: devicesResult.rows
+    });
+
+  } catch (error) {
+    console.error('Get devices error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Remove device manually (with 14-day grace period)
+app.delete('/api/license/:licenseKey/device/:deviceHash', deviceManagementLimiter, async (req, res) => {
+  try {
+    const { licenseKey, deviceHash } = req.params;
+    
     const licenseResult = await pool.query(
       'SELECT id FROM licenses WHERE key = $1 AND status = $2',
       [licenseKey, 'active']
     );
 
     if (licenseResult.rowCount === 0) {
-      return res.status(401).json({ error: 'Invalid or inactive license' });
+      return res.status(404).json({ error: 'License not found or inactive' });
     }
 
-    const license = licenseResult.rows[0];
+    const licenseId = licenseResult.rows[0].id;
+    
+    // Check if device exists
+    const deviceResult = await pool.query(
+      'SELECT id, device_name, status FROM license_bindings WHERE license_id = $1 AND device_hash = $2',
+      [licenseId, deviceHash]
+    );
 
-    // Insert offline heartbeat (async)
-    pool.query(
-      'INSERT INTO heartbeats (license_id, device_hash, status, event_type, message) VALUES ($1, $2, $3, $4, $5)',
-      [license.id, deviceHash, 'error', 'sync_error', message || 'Device went offline']
-    ).catch(error => {
-      console.error('❌ Offline heartbeat insert error:', error);
-    });
-
-    res.json({ ok: true });
-  } catch (error) {
-    console.error('❌ Offline heartbeat error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Get heartbeat data for dashboard (used by Replit frontend) - UPDATED to exclude removed devices
-app.get('/api/heartbeats', async (req, res) => {
-  try {
-    const { licenseKey, limit = 100 } = req.query;
-
-    if (!licenseKey) {
-      return res.status(400).json({ error: 'License key required' });
+    if (deviceResult.rowCount === 0) {
+      return res.status(404).json({ error: 'Device not found' });
     }
 
-    // Get latest heartbeat for each device (exclude removed devices)
-    const result = await pool.query(`
-      SELECT DISTINCT ON (h.device_hash)
-        h.device_hash,
-        COALESCE(lb.device_name, h.device_hash) as device_name,
-        h.status as last_status,
-        h.event_type as last_event_type,
-        h.message as last_message,
-        lb.last_seen,
-        lb.status as device_status,
-        h.created_at as last_heartbeat,
-        CASE 
-          WHEN lb.last_seen > NOW() - INTERVAL '5 minutes' THEN 'online'
-          WHEN lb.last_seen > NOW() - INTERVAL '1 hour' THEN 'recent'
-          ELSE 'offline'
-        END as connection_status
-      FROM heartbeats h
-      JOIN licenses l ON h.license_id = l.id
-      LEFT JOIN license_bindings lb ON h.license_id = lb.license_id AND h.device_hash = lb.device_hash
-      WHERE l.key = $1 AND (lb.status IS NULL OR lb.status != 'removed')
-      ORDER BY h.device_hash, h.created_at DESC
-      LIMIT $2
-    `, [licenseKey, limit]);
+    const device = deviceResult.rows[0];
+    
+    // Mark device as removed (soft delete with 14-day grace period)
+    await pool.query(
+      'UPDATE license_bindings SET status = $1, updated_at = $2 WHERE license_id = $3 AND device_hash = $4',
+      ['removed', new Date(), licenseId, deviceHash]
+    );
+
+    // Log the removal action
+    await pool.query(
+      'INSERT INTO device_management_log (license_id, device_hash, action, details) VALUES ($1, $2, $3, $4)',
+      [licenseId, deviceHash, 'manual_removal', `Device ${device.device_name || deviceHash} manually removed via API`]
+    );
+
+    // Schedule permanent deletion after 14 days
+    setTimeout(async () => {
+      try {
+        await pool.query(
+          'DELETE FROM license_bindings WHERE license_id = $1 AND device_hash = $2 AND status = $3',
+          [licenseId, deviceHash, 'removed']
+        );
+        
+        await pool.query(
+          'INSERT INTO device_management_log (license_id, device_hash, action, details) VALUES ($1, $2, $3, $4)',
+          [licenseId, deviceHash, 'permanent_deletion', `Device ${device.device_name || deviceHash} permanently deleted after 14-day grace period`]
+        );
+        
+        console.log(`🗑️ Device ${deviceHash} permanently deleted after 14-day grace period`);
+      } catch (error) {
+        console.error('Error in permanent device deletion:', error);
+      }
+    }, 14 * 24 * 60 * 60 * 1000); // 14 days
+
+    console.log(`🔄 Device ${deviceHash} marked for removal (14-day grace period)`);
 
     res.json({
-      licenseKey: licenseKey,
-      devices: result.rows,
-      total: result.rows.length,
-      timestamp: new Date().toISOString()
+      success: true,
+      message: 'Device marked for removal',
+      gracePeriodDays: 14,
+      deviceHash,
+      deviceName: device.device_name
     });
+
   } catch (error) {
-    console.error('❌ Get heartbeats error:', error);
+    console.error('Device removal error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Get device information for a specific license - UPDATED to exclude removed devices
-app.get('/api/devices/:licenseKey', async (req, res) => {
+// Get device management audit log
+app.get('/api/license/:licenseKey/audit-log', async (req, res) => {
   try {
     const { licenseKey } = req.params;
+    const limit = parseInt(req.query.limit) || 50;
+    
+    const licenseResult = await pool.query(
+      'SELECT id FROM licenses WHERE key = $1',
+      [licenseKey]
+    );
 
-    const result = await pool.query(`
-      SELECT 
-        l.key as license_key,
-        l.max_devices,
-        l.status as license_status,
-        l.customer_email,
-        l.customer_name,
-        COALESCE(
-          json_agg(
-            json_build_object(
-              'device_hash', lb.device_hash,
-              'device_name', COALESCE(lb.device_name, lb.device_hash),
-              'status', lb.status,
-              'bound_at', lb.bound_at,
-              'last_seen', lb.last_seen,
-              'connection_status', CASE 
-                WHEN lb.last_seen > NOW() - INTERVAL '5 minutes' THEN 'online'
-                WHEN lb.last_seen > NOW() - INTERVAL '1 hour' THEN 'recent'
-                ELSE 'offline'
-              END
-            )
-          ) FILTER (WHERE lb.device_hash IS NOT NULL AND lb.status != 'removed'),
-          '[]'::json
-        ) as devices
-      FROM licenses l
-      LEFT JOIN license_bindings lb ON l.id = lb.license_id AND lb.status != 'removed'
-      WHERE l.key = $1
-      GROUP BY l.id, l.key, l.max_devices, l.status, l.customer_email, l.customer_name
-    `, [licenseKey]);
-
-    if (result.rowCount === 0) {
+    if (licenseResult.rowCount === 0) {
       return res.status(404).json({ error: 'License not found' });
     }
 
-    const data = result.rows[0];
+    const licenseId = licenseResult.rows[0].id;
+    
+    const logResult = await pool.query(`
+      SELECT 
+        device_hash,
+        action,
+        details,
+        created_at
+      FROM device_management_log 
+      WHERE license_id = $1 
+      ORDER BY created_at DESC 
+      LIMIT $2
+    `, [licenseId, limit]);
+
     res.json({
-      licenseKey: data.license_key,
-      maxDevices: data.max_devices,
-      licenseStatus: data.license_status,
-      customerEmail: data.customer_email,
-      customerName: data.customer_name,
-      devices: data.devices,
-      activeDeviceCount: data.devices.length,
-      timestamp: new Date().toISOString()
+      licenseKey,
+      auditLog: logResult.rows
     });
+
   } catch (error) {
-    console.error('❌ Get devices error:', error);
+    console.error('Audit log error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// License validation endpoint (for Replit to verify licenses)
-app.get('/api/license/:licenseKey/validate', async (req, res) => {
+// UPSERT endpoint for Replit integration - UPDATED for new pricing model
+app.post('/api/upsert-license', async (req, res) => {
   try {
-    const { licenseKey } = req.params;
-
-    const result = await pool.query(`
-      SELECT 
-        l.id,
-        l.key,
-        l.max_devices,
-        l.status,
-        l.customer_email,
-        l.customer_name,
-        l.created_at,
-        COUNT(lb.device_hash) as active_devices
-      FROM licenses l
-      LEFT JOIN license_bindings lb ON l.id = lb.license_id AND lb.status = 'active'
-      WHERE l.key = $1
-      GROUP BY l.id
-    `, [licenseKey]);
-
-    if (result.rowCount === 0) {
-      return res.status(404).json({ 
-        valid: false, 
-        error: 'License not found' 
+    const { licenseKey, maxDevices, customerEmail, customerName, status = 'active' } = req.body;
+    
+    if (!licenseKey || !maxDevices || !customerEmail) {
+      return res.status(400).json({ 
+        error: 'Missing required fields: licenseKey, maxDevices, customerEmail' 
       });
     }
 
+    // Validate maxDevices is a positive integer
+    const deviceCount = parseInt(maxDevices);
+    if (isNaN(deviceCount) || deviceCount < 1) {
+      return res.status(400).json({ 
+        error: 'maxDevices must be a positive integer' 
+      });
+    }
+
+    // Determine pricing tier based on device count
+    let pricingTier;
+    if (deviceCount >= 1 && deviceCount <= 50) {
+      pricingTier = 'starter';
+    } else if (deviceCount >= 51 && deviceCount <= 500) {
+      pricingTier = 'business';
+    } else if (deviceCount >= 501) {
+      pricingTier = 'enterprise';
+    } else {
+      return res.status(400).json({ 
+        error: 'Invalid device count. Must be at least 1.' 
+      });
+    }
+
+    const result = await pool.query(`
+      INSERT INTO licenses (key, max_devices, status, customer_email, customer_name, updated_at)
+      VALUES ($1, $2, $3, $4, $5, now())
+      ON CONFLICT (key) 
+      DO UPDATE SET 
+        max_devices = EXCLUDED.max_devices,
+        status = EXCLUDED.status,
+        customer_email = EXCLUDED.customer_email,
+        customer_name = EXCLUDED.customer_name,
+        updated_at = now()
+      RETURNING id, key, max_devices, status, customer_email, customer_name, created_at, updated_at
+    `, [licenseKey, deviceCount, status, customerEmail, customerName || null]);
+
     const license = result.rows[0];
     
+    // Get current device count
+    const deviceCountResult = await pool.query(
+      'SELECT COUNT(*) as count FROM license_bindings WHERE license_id = $1 AND status = $2',
+      [license.id, 'active']
+    );
+
+    const currentDevices = parseInt(deviceCountResult.rows[0].count);
+
+    console.log(`✅ License upserted: ${licenseKey} (${deviceCount} devices, ${pricingTier} tier)`);
+
     res.json({
-      valid: license.status === 'active',
+      success: true,
       license: {
+        id: license.id,
         key: license.key,
         maxDevices: license.max_devices,
+        currentDevices: currentDevices,
+        availableSeats: license.max_devices - currentDevices,
         status: license.status,
         customerEmail: license.customer_email,
         customerName: license.customer_name,
+        pricingTier: pricingTier,
         createdAt: license.created_at,
-        activeDevices: parseInt(license.active_devices),
-        availableSlots: license.max_devices - parseInt(license.active_devices)
+        updatedAt: license.updated_at
       }
     });
+
   } catch (error) {
-    console.error('❌ License validation error:', error);
-    res.status(500).json({ 
-      valid: false, 
-      error: 'Validation failed' 
-    });
+    console.error('License upsert error:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Get device management log for audit trail
-app.get('/api/device-log/:licenseKey', async (req, res) => {
+// Get license statistics
+app.get('/api/license/:licenseKey/stats', async (req, res) => {
   try {
     const { licenseKey } = req.params;
-    const { limit = 50 } = req.query;
+    
+    const licenseResult = await pool.query(
+      'SELECT id, max_devices, status, customer_email, customer_name FROM licenses WHERE key = $1',
+      [licenseKey]
+    );
 
-    const result = await pool.query(`
+    if (licenseResult.rowCount === 0) {
+      return res.status(404).json({ error: 'License not found' });
+    }
+
+    const license = licenseResult.rows[0];
+    
+    // Get device statistics
+    const deviceStatsResult = await pool.query(`
       SELECT 
-        dml.device_hash,
-        dml.action,
-        dml.details,
-        dml.created_at
-      FROM device_management_log dml
-      JOIN licenses l ON dml.license_id = l.id
-      WHERE l.key = $1
-      ORDER BY dml.created_at DESC
-      LIMIT $2
-    `, [licenseKey, limit]);
+        status,
+        COUNT(*) as count
+      FROM license_bindings 
+      WHERE license_id = $1 
+      GROUP BY status
+    `, [license.id]);
+
+    const deviceStats = {};
+    deviceStatsResult.rows.forEach(row => {
+      deviceStats[row.status] = parseInt(row.count);
+    });
+
+    // Get recent heartbeat statistics
+    const heartbeatStatsResult = await pool.query(`
+      SELECT 
+        status,
+        COUNT(*) as count
+      FROM heartbeats 
+      WHERE license_id = $1 
+        AND created_at > now() - interval '24 hours'
+      GROUP BY status
+    `, [license.id]);
+
+    const heartbeatStats = {};
+    heartbeatStatsResult.rows.forEach(row => {
+      heartbeatStats[row.status] = parseInt(row.count);
+    });
+
+    // Determine pricing tier
+    let pricingTier;
+    if (license.max_devices >= 1 && license.max_devices <= 50) {
+      pricingTier = 'starter';
+    } else if (license.max_devices >= 51 && license.max_devices <= 500) {
+      pricingTier = 'business';
+    } else if (license.max_devices >= 501) {
+      pricingTier = 'enterprise';
+    }
 
     res.json({
-      licenseKey: licenseKey,
-      logs: result.rows,
-      total: result.rows.length,
-      timestamp: new Date().toISOString()
+      licenseKey,
+      maxDevices: license.max_devices,
+      pricingTier: pricingTier,
+      status: license.status,
+      customerEmail: license.customer_email,
+      customerName: license.customer_name,
+      deviceStats: {
+        active: deviceStats.active || 0,
+        removed: deviceStats.removed || 0,
+        total: Object.values(deviceStats).reduce((sum, count) => sum + count, 0)
+      },
+      heartbeatStats24h: {
+        ok: heartbeatStats.ok || 0,
+        warn: heartbeatStats.warn || 0,
+        error: heartbeatStats.error || 0,
+        total: Object.values(heartbeatStats).reduce((sum, count) => sum + count, 0)
+      }
     });
+
   } catch (error) {
-    console.error('❌ Device log error:', error);
+    console.error('License stats error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
-});
-
-// System stats endpoint (for monitoring)
-app.get('/api/stats', async (req, res) => {
-  try {
-    const [licensesResult, devicesResult, heartbeatsResult, emailsResult] = await Promise.all([
-      pool.query('SELECT COUNT(*) as count FROM licenses WHERE status = $1', ['active']),
-      pool.query('SELECT COUNT(*) as count FROM license_bindings WHERE status = $1', ['active']),
-      pool.query('SELECT COUNT(*) as count FROM heartbeats WHERE created_at > NOW() - INTERVAL \'24 hours\''),
-      pool.query('SELECT COUNT(*) as count FROM email_log WHERE created_at > NOW() - INTERVAL \'24 hours\'')
-    ]);
-
-    res.json({
-      activeLicenses: parseInt(licensesResult.rows[0].count),
-      activeDevices: parseInt(devicesResult.rows[0].count),
-      heartbeatsLast24h: parseInt(heartbeatsResult.rows[0].count),
-      emailsSentLast24h: parseInt(emailsResult.rows[0].count),
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime()
-    });
-  } catch (error) {
-    console.error('❌ Stats error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// 404 handler - UPDATED with new email endpoints
-app.use('*', (req, res) => {
-  res.status(404).json({ 
-    error: 'Endpoint not found',
-    service: 'syncsure-heartbeat-api',
-    version: '3.2.0',
-    available_endpoints: [
-      'GET /health',
-      'POST /api/heartbeat',
-      'POST /api/heartbeat/offline',
-      'GET /api/heartbeats?licenseKey=X',
-      'GET /api/devices/:licenseKey',
-      'GET /api/license/:licenseKey/validate',
-      'DELETE /api/device/:licenseKey/:deviceHash',
-      'GET /api/device-log/:licenseKey',
-      'POST /api/email/welcome (NEW)',
-      'POST /api/email/license-delivery (NEW)',
-      'POST /api/email/support (NEW)',
-      'POST /api/email/billing (NEW)',
-      'POST /api/email/test (NEW)',
-      'GET /api/email-log/:licenseKey (NEW)',
-      'GET /api/stats'
-    ]
-  });
-});
-
-// Error handler
-app.use((error, req, res, next) => {
-  console.error('❌ Unhandled error:', error);
-  res.status(500).json({ 
-    error: 'Internal server error',
-    service: 'syncsure-heartbeat-api'
-  });
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('🔄 SIGTERM received, shutting down gracefully...');
-  
-  // Clear all offline check timers
-  deviceOfflineChecks.forEach(timer => clearTimeout(timer));
-  deviceOfflineChecks.clear();
-  
-  pool.end(() => {
-    console.log('✅ Database pool closed');
-    process.exit(0);
-  });
 });
 
 // Start server
-app.listen(port, '0.0.0.0', () => {
-  console.log(`🚀 SyncSure Heartbeat API v3.2.0 running on port ${port}`);
-  console.log(`🌐 Server running on http://0.0.0.0:${port}`);
-  console.log(`📊 Optimized for high-volume heartbeat processing`);
-  console.log(`✅ CORS enabled for Replit frontend access`);
-  console.log(`📧 Email notifications enabled with Resend API`);
-  console.log(`🎯 Features: License validation, device binding, heartbeat processing, manual device removal, email notifications`);
+app.listen(port, () => {
+  console.log(`🚀 SyncSure Heartbeat API v3.3.0 running on port ${port}`);
   console.log(`🔒 Rate limiting: Heartbeats (2/min), Device management (10/min), Emails (5/min)`);
-  console.log(`🗃️ Database: Enhanced schema with device management logging and email tracking`);
-  console.log(`⏰ Offline monitoring: 24-hour device offline alerts enabled`);
+  console.log(`💰 New pricing model: Starter (1-50 devices @ £1.99), Business (51-500 @ £1.49), Enterprise (500+ @ £0.99)`);
+  console.log(`📧 Email notifications enabled via Resend`);
+  console.log(`🗄️ Database: PostgreSQL with comprehensive schema`);
+  console.log(`⚡ Features: Device management, offline monitoring, audit logging`);
 });
