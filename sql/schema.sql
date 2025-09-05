@@ -1,217 +1,90 @@
-create extension if not exists "pgcrypto";
+-- SyncSure Database Schema
+-- This schema includes the account_id column in builds table (FIXED)
 
-create table if not exists accounts (
-  id uuid primary key default gen_random_uuid(),
-  email text not null unique,
+-- Enable UUID generation
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- Accounts table
+CREATE TABLE IF NOT EXISTS accounts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  email text NOT NULL UNIQUE,
   name text,
-  stripe_customer_id text unique,
-  role text not null default 'user',
-  created_at timestamptz default now()
+  stripe_customer_id text UNIQUE,
+  role text NOT NULL DEFAULT 'user',
+  created_at timestamptz DEFAULT now()
 );
 
-create table if not exists subscriptions (
-  id uuid primary key default gen_random_uuid(),
-  account_id uuid not null references accounts(id) on delete cascade,
-  stripe_subscription_id text unique,
-  blocks integer not null check (blocks > 0),
-  status text not null,
+-- Subscriptions table
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  stripe_subscription_id text UNIQUE,
+  blocks integer NOT NULL CHECK (blocks > 0),
+  status text NOT NULL,
   current_period_end timestamptz,
-  created_at timestamptz default now()
+  created_at timestamptz DEFAULT now()
 );
-create index if not exists subscriptions_account_id_idx on subscriptions(account_id);
 
-create table if not exists licenses (
-  id uuid primary key default gen_random_uuid(),
-  account_id uuid not null references accounts(id) on delete cascade,
-  license_key text not null unique,
-  max_devices integer not null,
-  bound_count integer not null default 0,
+-- Licenses table
+CREATE TABLE IF NOT EXISTS licenses (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  license_key text NOT NULL UNIQUE,
+  max_devices integer NOT NULL,
+  bound_count integer NOT NULL DEFAULT 0,
   last_sync timestamptz,
-  created_at timestamptz default now(),
-  updated_at timestamptz default now()
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
 );
-create index if not exists licenses_account_id_idx on licenses(account_id);
 
-create table if not exists builds (
-  id uuid primary key default gen_random_uuid(),
-  license_id uuid not null references licenses(id) on delete cascade
-  account_id uuid not null references accounts(id) on delete cascade,
-  status text not null,           -- queued | building | released | failed
+-- Builds table (WITH account_id column - THIS WAS THE FIX!)
+CREATE TABLE IF NOT EXISTS builds (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  license_id uuid NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+  account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  status text NOT NULL,
   tag text,
   release_url text,
   asset_name text,
   asset_api_url text,
-  created_at timestamptz default now(),
-  updated_at timestamptz default now()
-);
-create index if not exists builds_license_id_idx on builds(license_id);
-create index if not exists builds_tag_idx on builds(tag)
-create index if not exists builds_account_id_idx on builds(account_id);
-
-create table if not exists audit_log (
-  id uuid primary key default gen_random_uuid(),
-create extension if not exists "pgcrypto";
-
-create table if not exists accounts (
-  id uuid primary key default gen_random_uuid(),
-  email text not null unique,
-  name text,
-  stripe_customer_id text unique,
-  role text not null default 'user',
-  created_at timestamptz default now()
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
 );
 
-create table if not exists subscriptions (
-  id uuid primary key default gen_random_uuid(),
-  account_id uuid not null references accounts(id) on delete cascade,
-  stripe_subscription_id text unique,
-  blocks integer not null check (blocks > 0),
-  status text not null,
-  current_period_end timestamptz,
-  created_at timestamptz default now()
-);
-
-create index if not exists subscriptions_account_id_idx on subscriptions(account_id);
-
-create table if not exists licenses (
-  id uuid primary key default gen_random_uuid(),
-  account_id uuid not null references accounts(id) on delete cascade,
-  license_key text not null unique,
-  max_devices integer not null,
-  bound_count integer not null default 0,
-  last_sync timestamptz,
-  created_at timestamptz default now(),
-  updated_at timestamptz default now()
-);
-
-create index if not exists licenses_account_id_idx on licenses(account_id);
-
-create table if not exists builds (
-  id uuid primary key default gen_random_uuid(),
-  license_id uuid not null references licenses(id) on delete cascade,
-  account_id uuid not null references accounts(id) on delete cascade,
-  status text not null, -- queued | building | released | failed
-  tag text,
-  release_url text,
-  asset_name text,
-  asset_api_url text,
-  created_at timestamptz default now(),
-  updated_at timestamptz default now()
-);
-
-create index if not exists builds_license_id_idx on builds(license_id);
-create index if not exists builds_tag_idx on builds(tag);
-create index if not exists builds_account_id_idx on builds(account_id);
-
-create table if not exists audit_log (
-  id uuid primary key default gen_random_uuid()
-);
-
-create table if not exists accounts (
-  id uuid primary key default gen_random_uuid(),
-  email text not null unique,
-  name text,
-  stripe_customer_id text unique,
-  role text not null default 'user',
-  created_at timestamptz default now()
-);
-
-create table if not exists subscriptions (
-  id uuid primary key default gen_random_uuid(),
-  account_id uuid not null references accounts(id) on delete cascade,
-  stripe_subscription_id text unique,
-  blocks integer not null check (blocks > 0),
-  status text not null,
-  current_period_end timestamptz,
-  created_at timestamptz default now()
-);
-
-create index if not exists subscriptions_account_id_idx on subscriptions(account_id);
-
-create table if not exists licenses (
-  id uuid primary key default gen_random_uuid(),
-  account_id uuid not null references accounts(id) on delete cascade,
-  license_key text not null unique,
-  max_devices integer not null,
-  bound_count integer not null default 0,
-  last_sync timestamptz,
-  created_at timestamptz default now(),
-  updated_at timestamptz default now()
-);
-
-create index if not exists licenses_account_id_idx on licenses(account_id);
-
-create table if not exists builds (
-  id uuid primary key default gen_random_uuid(),
-  license_id uuid not null references licenses(id) on delete cascade,
-  account_id uuid not null references accounts(id) on delete cascade,
-  status text not null, -- queued | building | released | failed
-  tag text,
-  release_url text,
-  asset_name text,
-  asset_api_url text,
-  created_at timestamptz default now(),
-  updated_at timestamptz default now()
-);
-
-create index if not exists builds_license_id_idx on builds(license_id);
-create index if not exists builds_tag_idx on builds(tag);
-create index if not exists builds_account_id_idx on builds(account_id);
-
-create table if not exists audit_log (
-  id uuid primary key default gen_random_uuid(),
-  actor text not null, -- stripe|system|admin|user
+-- Audit log table
+CREATE TABLE IF NOT EXISTS audit_log (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  actor text NOT NULL,
   account_id uuid,
   license_id uuid,
-  event text not null, -- LICENSE_UPSERT, BUILD_TRIGGERED, WEBHOOK_DELIVERED, etc.
+  event text NOT NULL,
   context jsonb,
-  created_at timestamptz default now()
+  created_at timestamptz DEFAULT now()
 );
 
-create index if not exists audit_event_idx on audit_log(event);
-create index if not exists audit_created_at_idx on audit_log(created_at);
+-- Performance indexes
+CREATE INDEX IF NOT EXISTS subscriptions_account_id_idx ON subscriptions(account_id);
+CREATE INDEX IF NOT EXISTS licenses_account_id_idx ON licenses(account_id);
+CREATE INDEX IF NOT EXISTS builds_license_id_idx ON builds(license_id);
+CREATE INDEX IF NOT EXISTS builds_account_id_idx ON builds(account_id);
+CREATE INDEX IF NOT EXISTS builds_tag_idx ON builds(tag);
+CREATE INDEX IF NOT EXISTS audit_event_idx ON audit_log(event);
+CREATE INDEX IF NOT EXISTS audit_created_at_idx ON audit_log(created_at);
 
-create or replace function set_updated_at()
-returns trigger as $$
-begin
-  new.updated_at = now();
-  return new;
-end;
-$$ language plpgsql;
+-- Update timestamp function
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS trigger AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
 
-drop trigger if exists trg_licenses_updated_at on licenses;
-create trigger trg_licenses_updated_at
-  before update on licenses
-  for each row execute function set_updated_at();
+-- Update triggers
+CREATE TRIGGER trg_licenses_updated_at
+BEFORE UPDATE ON licenses
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
-drop trigger if exists trg_builds_updated_at on builds;
-create trigger trg_builds_updated_at
-  before update on builds
-  for each row execute function set_updated_at();
-  account_id uuid,
-  license_id uuid,
-  event text not null,            -- LICENSE_UPSERT, BUILD_TRIGGERED, WEBHOOK_DELIVERED, etc.
-  context jsonb,
-  created_at timestamptz default now()
-);
-create index if not exists audit_event_idx on audit_log(event);
-create index if not exists audit_created_at_idx on audit_log(created_at);
-
-create or replace function set_updated_at()
-returns trigger as $$
-begin
-  new.updated_at = now();
-  return new;
-end;
-$$ language plpgsql;
-
-drop trigger if exists trg_licenses_updated_at on licenses;
-create trigger trg_licenses_updated_at
-before update on licenses
-for each row execute function set_updated_at();
-
-drop trigger if exists trg_builds_updated_at on builds;
-create trigger trg_builds_updated_at
-before update on builds
-for each row execute function set_updated_at();
-
+CREATE TRIGGER trg_builds_updated_at
+BEFORE UPDATE ON builds
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
