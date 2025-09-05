@@ -39,7 +39,50 @@ export async function initializeDatabase() {
     `);
     
     const tables = result.rows.map(row => row.table_name);
-    console.log("📋 Available tables:", tables.join(", "));
+    console.log("📋 Available tables:", tables.join(", "))
+      
+    // Run migration to add missing account_id column to builds table
+    console.log("🔄 Running database migration for builds table...");
+    
+    // Check if account_id column exists in builds table
+    const columnCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'builds' AND column_name = 'account_id'
+    `);
+    
+    if (columnCheck.rows.length === 0) {
+      console.log("📝 Adding missing account_id column to builds table...");
+      
+      // Add the account_id column
+      await pool.query(`
+        ALTER TABLE builds 
+        ADD COLUMN account_id uuid REFERENCES accounts(id) ON DELETE CASCADE
+      `);
+      
+      // Update existing builds with account_id from their associated license
+      await pool.query(`
+        UPDATE builds 
+        SET account_id = licenses.account_id 
+        FROM licenses 
+        WHERE builds.license_id = licenses.id
+      `);
+      
+      // Make the column NOT NULL after populating data
+      await pool.query(`
+        ALTER TABLE builds 
+        ALTER COLUMN account_id SET NOT NULL
+      `);
+      
+      // Create index for performance
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS builds_account_id_idx ON builds(account_id)
+      `);
+      
+      console.log("✅ Migration completed: account_id column added to builds table");
+    } else {
+      console.log("✅ account_id column already exists in builds table");
+    }
     
     return true;
   } catch (error) {
