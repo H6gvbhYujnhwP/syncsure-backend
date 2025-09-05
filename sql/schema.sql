@@ -34,7 +34,8 @@ create index if not exists licenses_account_id_idx on licenses(account_id);
 
 create table if not exists builds (
   id uuid primary key default gen_random_uuid(),
-  license_id uuid not null references licenses(id) on delete cascade,
+  license_id uuid not null references licenses(id) on delete cascade
+  account_id uuid not null references accounts(id) on delete cascade,
   status text not null,           -- queued | building | released | failed
   tag text,
   release_url text,
@@ -44,7 +45,8 @@ create table if not exists builds (
   updated_at timestamptz default now()
 );
 create index if not exists builds_license_id_idx on builds(license_id);
-create index if not exists builds_tag_idx on builds(tag);
+create index if not exists builds_tag_idx on builds(tag)
+create index if not exists builds_account_id_idx on builds(account_id);
 
 create table if not exists audit_log (
   id uuid primary key default gen_random_uuid(),
