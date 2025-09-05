@@ -1,5 +1,5 @@
 -- SyncSure Database Schema
--- This schema includes the account_id column in builds table (FIXED)
+-- This schema includes the account_id column in the builds table.
 
 -- Enable UUID generation
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS licenses (
   updated_at timestamptz DEFAULT now()
 );
 
--- Builds table (WITH account_id column - THIS WAS THE FIX!)
+-- Builds table (WITH account_id column)
 CREATE TABLE IF NOT EXISTS builds (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   license_id uuid NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
@@ -71,7 +71,7 @@ CREATE INDEX IF NOT EXISTS builds_tag_idx ON builds(tag);
 CREATE INDEX IF NOT EXISTS audit_event_idx ON audit_log(event);
 CREATE INDEX IF NOT EXISTS audit_created_at_idx ON audit_log(created_at);
 
--- Update timestamp function (PROPERLY FORMATTED)
+-- Update timestamp function (keep as one unit with dollar-quotes)
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $func$
 BEGIN
