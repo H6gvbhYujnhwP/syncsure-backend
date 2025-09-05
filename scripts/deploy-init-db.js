@@ -14,9 +14,9 @@ export async function initializeDatabase() {
     const schemaPath = path.join(__dirname, "../sql/schema.sql");
     const schemaSql = fs.readFileSync(schemaPath, "utf8");
     
-    // Execute the entire schema in one query (FIXED!)
-    // This prevents splitting PostgreSQL functions with dollar-quoted strings
-    console.log("📝 Executing complete schema...");
+    // Execute the entire schema in one query - DO NOT SPLIT ON SEMICOLONS!
+    // This prevents breaking PostgreSQL functions with dollar-quoted strings
+    console.log("📝 Executing complete schema in one operation...");
     await pool.query(schemaSql);
     
     console.log("✅ Database schema initialized successfully");
