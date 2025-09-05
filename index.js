@@ -21,13 +21,13 @@ app.use(express.json());
 
 // very light rate-limit on /api/*
 app.use(
-  "/api",
-  rateLimit({
-    windowMs: 60 * 1000,
-    max: 120,
-    standardHeaders: true
-  })
-);
+    "/api",
+    rateLimit({
+          windowMs: 60 * 1000,
+          max: 120,
+          standardHeaders: true
+    })
+  );
 
 // routes
 app.use("/api/health", healthRouter);
@@ -35,30 +35,27 @@ app.use("/api/db", dbRouter);
 app.use("/api/licenses", licensesRouter);
 
 app.get("/", (_req, res) => {
-  res.type("text").send("SyncSure Backend is running 🚀");
+    res.type("text").send("SyncSure Backend is running 🚀");
 });
 
 // Initialize database and start server
 async function startServer() {
-  try {
-    console.log("🔄 Starting SyncSure Backend...");
-    
-    // Initialize database schema
-    await initializeDatabase();
-    
-    // Start the server
-    app.listen(port, () => {
-      console.log(`✅ SyncSure Backend running on port ${port}`);
-      console.log(`🌐 CORS origin: ${origin}`);
-      console.log(`🗄️ Database initialized and ready`);
-    });
-  } catch (error) {
-    console.error("❌ Failed to start server:", error.message);
-    process.exit(1);
-  }
+    try {
+          console.log("🔄 Starting SyncSure Backend...");
+
+      // Initialize database schema
+      await initializeDatabase();
+
+      // Start the server
+      app.listen(port, () => {
+              console.log(`✅ SyncSure Backend running on port ${port}`);
+              console.log(`🌐 CORS origin: ${origin}`);
+              console.log(`🗄️ Database initialized and ready`);
+      });
+    } catch (error) {
+          console.error("❌ Failed to start server:", error.message);
+          process.exit(1);
+    }
 }
 
-startServer();.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
-
+startServer();
