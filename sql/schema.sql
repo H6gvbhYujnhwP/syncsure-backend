@@ -71,3 +71,25 @@ CREATE INDEX IF NOT EXISTS builds_tag_idx ON builds(tag);
 CREATE INDEX IF NOT EXISTS audit_event_idx ON audit_log(event);
 CREATE INDEX IF NOT EXISTS audit_created_at_idx ON audit_log(created_at);
 
+-- Update timestamp function (PROPERLY FORMATTED)
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $func$
+BEGIN
+  NEW.updated_at := NOW();
+  RETURN NEW;
+END
+$func$ LANGUAGE plpgsql;
+
+-- Update triggers
+DROP TRIGGER IF EXISTS trg_licenses_updated_at ON licenses;
+CREATE TRIGGER trg_licenses_updated_at
+BEFORE UPDATE ON licenses
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_builds_updated_at ON builds;
+CREATE TRIGGER trg_builds_updated_at
+BEFORE UPDATE ON builds
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
