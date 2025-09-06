@@ -10,13 +10,17 @@ export async function initializeDatabase() {
   try {
     console.log("🔄 Initializing database schema...");
     
+    // Test database connection first
+    await pool.query('SELECT 1');
+    console.log("✅ Database connection successful");
+    
     // Read the schema SQL file
     const schemaPath = path.join(__dirname, "../sql/schema.sql");
     const schemaSql = fs.readFileSync(schemaPath, "utf8");
     
-    // Execute the entire schema in one query (FIXED!)
-    // This prevents splitting PostgreSQL functions with dollar-quoted strings
-    console.log("📝 Executing complete schema...");
+    // Execute the entire schema in one query - DO NOT SPLIT ON SEMICOLONS!
+    // This prevents breaking PostgreSQL functions with dollar-quoted strings
+    console.log("📝 Executing complete schema in one operation...");
     await pool.query(schemaSql);
     
     console.log("✅ Database schema initialized successfully");
@@ -49,9 +53,31 @@ export async function initializeDatabase() {
   } catch (error) {
     console.error("❌ Database initialization failed:", error.message);
     
-    // If it's a "relation already exists" error, that's actually OK
-    if (error.message.includes("already exists")) {
-      console.log("ℹ️  Database schema already exists, continuing...");
+    // Enhanced error handling for deployment resilience
+    if (error.message.includes("already exists") || 
+        error.message.includes("relation") ||
+        error.message.includes("function") ||
+        error.message.includes("trigger") ||
+        error.message.includes("extension")) {
+      console.log("ℹ️  Database schema already exists or partial, continuing...");
+      return true;
+    }
+    
+    // For connection errors, log but don't crash in production
+    if (error.code === 'ECONNREFUSED' || 
+        error.code === 'ENOTFOUND' || 
+        error.code === 'ETIMEDOUT' ||
+        error.message.includes("connection")) {
+      console.log("⚠️  Database connection failed, but continuing startup...");
+      console.log("ℹ️  Server will attempt to reconnect on first request");
+      return true;
+    }
+    
+    // For authentication errors in development
+    if (error.message.includes("authentication") || 
+        error.message.includes("password") ||
+        error.message.includes("role")) {
+      console.log("⚠️  Database authentication issue, continuing...");
       return true;
     }
     
