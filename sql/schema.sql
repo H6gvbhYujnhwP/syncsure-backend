@@ -8,10 +8,12 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE TABLE IF NOT EXISTS accounts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   email text NOT NULL UNIQUE,
+  password_hash text,
   name text,
   stripe_customer_id text UNIQUE,
   role text NOT NULL DEFAULT 'user',
-  created_at timestamptz DEFAULT now()
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
 );
 
 -- Subscriptions table
