@@ -238,5 +238,72 @@ router.get("/me", authenticateToken, async (req, res) => {
   }
 });
 
+// Update existing account with password (temporary endpoint for migration)
+router.post("/update-password", async (req, res) => {
+  const { email, password, adminKey } = req.body || {};
+
+  // Simple admin key check (in production, this should be more secure)
+  if (adminKey !== "syncsure-admin-2025") {
+    return res.status(403).json({ 
+      ok: false, 
+      error: "Unauthorized" 
+    });
+  }
+
+  // Validation
+  if (!email || !password) {
+    return res.status(400).json({ 
+      ok: false, 
+      error: "Email and password are required" 
+    });
+  }
+
+  try {
+    // Check if account exists
+    const existingAccount = await pool.query(
+      "SELECT id, email, name, password_hash FROM accounts WHERE email = $1",
+      [email]
+    );
+
+    if (existingAccount.rows.length === 0) {
+      return res.status(404).json({ 
+        ok: false, 
+        error: "Account not found" 
+      });
+    }
+
+    const account = existingAccount.rows[0];
+
+    // Hash password
+    const saltRounds = 12;
+    const passwordHash = await bcrypt.hash(password, saltRounds);
+
+    // Update account with password hash
+    await pool.query(`
+      UPDATE accounts 
+      SET password_hash = $1, updated_at = now()
+      WHERE email = $2
+    `, [passwordHash, email]);
+
+    res.json({ 
+      ok: true, 
+      message: `Password updated for account: ${account.email}`,
+      account: {
+        id: account.id,
+        email: account.email,
+        name: account.name,
+        hadPreviousPassword: !!account.password_hash
+      }
+    });
+
+  } catch (error) {
+    console.error("Update password error:", error);
+    res.status(500).json({ 
+      ok: false, 
+      error: "Internal server error during password update" 
+    });
+  }
+});
+
 export default router;
 
