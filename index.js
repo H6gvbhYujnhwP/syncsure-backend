@@ -54,7 +54,7 @@ async function startServer() {
     // Start the server
     app.listen(port, () => {
       console.log(`✅ SyncSure Backend running on port ${port}`);
-      console.log(`🌐 CORS origin: ${origin}`);
+      console.log(`🌐 CORS: Allow all origins with credentials`);
       console.log(`🗄️ Database initialized and ready`);
     });
   } catch (error) {
