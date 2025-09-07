@@ -289,4 +289,140 @@ router.post("/", async (req, res) => {
   }
 });
 
+// Create Stripe Checkout Session
+router.post("/create-checkout-session", async (req, res) => {
+  try {
+    const { email, priceId, successUrl, cancelUrl } = req.body;
+
+    if (!email || !priceId) {
+      return res.status(400).json({ error: "Email and priceId are required" });
+    }
+
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+    // Create or retrieve customer
+    let customer;
+    const existingCustomers = await stripe.customers.list({
+      email: email,
+      limit: 1
+    });
+
+    if (existingCustomers.data.length > 0) {
+      customer = existingCustomers.data[0];
+    } else {
+      customer = await stripe.customers.create({
+        email: email,
+        metadata: {
+          source: 'syncsure_dashboard'
+        }
+      });
+    }
+
+    // Create checkout session
+    const session = await stripe.checkout.sessions.create({
+      customer: customer.id,
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+      mode: 'subscription',
+      success_url: successUrl || `${process.env.FRONTEND_ORIGIN}/dashboard?success=true`,
+      cancel_url: cancelUrl || `${process.env.FRONTEND_ORIGIN}/dashboard?canceled=true`,
+      metadata: {
+        customer_email: email
+      }
+    });
+
+    res.json({ url: session.url });
+  } catch (error) {
+    console.error('Error creating checkout session:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get customer subscription data
+router.get("/subscription", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Authorization required' });
+    }
+
+    // In a real app, you'd verify the JWT token here
+    // For now, we'll extract email from the request or token
+    const email = req.query.email || req.user?.email;
+    
+    if (!email) {
+      return res.status(400).json({ error: 'Email required' });
+    }
+
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+    // Find customer by email
+    const customers = await stripe.customers.list({
+      email: email,
+      limit: 1
+    });
+
+    if (customers.data.length === 0) {
+      return res.json({
+        active: false,
+        licenseCount: 0,
+        deviceCount: 0,
+        invoices: []
+      });
+    }
+
+    const customer = customers.data[0];
+
+    // Get active subscriptions
+    const subscriptions = await stripe.subscriptions.list({
+      customer: customer.id,
+      status: 'active',
+      limit: 10
+    });
+
+    // Get recent invoices
+    const invoices = await stripe.invoices.list({
+      customer: customer.id,
+      limit: 10
+    });
+
+    // Get license count from database
+    const licenseQuery = `
+      SELECT COUNT(*) as license_count 
+      FROM licenses l
+      JOIN accounts a ON l.account_id = a.id
+      WHERE a.email = $1 AND l.status = 'active'
+    `;
+    const licenseResult = await pool.query(licenseQuery, [email]);
+    const licenseCount = parseInt(licenseResult.rows[0]?.license_count || 0);
+
+    // Get device count (placeholder - would come from device heartbeats)
+    const deviceCount = 0; // TODO: Implement device counting
+
+    const subscriptionData = {
+      active: subscriptions.data.length > 0,
+      licenseCount: licenseCount,
+      deviceCount: deviceCount,
+      nextBilling: subscriptions.data[0] ? new Date(subscriptions.data[0].current_period_end * 1000).toLocaleDateString() : null,
+      invoices: invoices.data.map(invoice => ({
+        id: invoice.id,
+        description: invoice.lines.data[0]?.description || 'SyncSure Monitor',
+        amount: (invoice.amount_paid / 100).toFixed(2),
+        date: new Date(invoice.created * 1000).toLocaleDateString(),
+        status: invoice.status === 'paid' ? 'Paid' : 'Pending'
+      }))
+    };
+
+    res.json(subscriptionData);
+  } catch (error) {
+    console.error('Error fetching subscription data:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
