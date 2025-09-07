@@ -6,6 +6,7 @@ import dbRouter from "./routes/db.js";
 import licensesRouter from "./routes/licenses.js";
 import authRouter from "./routes/auth.js";
 import migrationRouter from "./routes/migration.js";
+import buildsRouter from "./routes/builds.js";
 import stripeRouter, { stripeRaw } from "./routes/stripe.js";
 import { initializeDatabase } from "./scripts/deploy-init-db.js";
 
@@ -42,6 +43,7 @@ app.use("/api/db", dbRouter);
 app.use("/api/licenses", licensesRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/migration", migrationRouter);
+app.use("/api/builds", buildsRouter);
 
 app.get("/", (_req, res) => {
   res.type("text").send("SyncSure Backend is running 🚀");

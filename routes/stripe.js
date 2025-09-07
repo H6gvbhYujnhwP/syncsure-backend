@@ -94,6 +94,23 @@ async function writeAudit({ actor, accountId, licenseId, event, context = {} }) 
   );
 }
 
+async function triggerBuildForLicense(licenseId, accountId) {
+  // Create a build record to trigger the worker
+  const tag = `license-${licenseId}-${Date.now()}`;
+  
+  const buildQuery = `
+    insert into builds (license_id, account_id, status, tag)
+    values ($1, $2, 'queued', $3)
+    returning id, tag
+  `;
+  
+  const { rows } = await pool.query(buildQuery, [licenseId, accountId, tag]);
+  const build = rows[0];
+  
+  console.log(`🏗️ Build queued for license ${licenseId}: ${build.tag}`);
+  return build;
+}
+
 // Extract “blocks” from a Stripe subscription object
 function extractBlocks(stripeSubscription) {
   // Priority: item.quantity → item.metadata.blocks → subscription.metadata.blocks → 1
@@ -172,6 +189,9 @@ router.post("/", async (req, res) => {
         });
 
         const lic = await ensureLicenseForAccount({ accountId: account.id, blocks });
+
+        // Trigger build for new license
+        await triggerBuildForLicense(lic.id, account.id);
 
         await writeAudit({
           actor: "stripe",
