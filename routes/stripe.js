@@ -396,7 +396,7 @@ router.get("/subscription", async (req, res) => {
       SELECT COUNT(*) as license_count 
       FROM licenses l
       JOIN accounts a ON l.account_id = a.id
-      WHERE a.email = $1 AND l.status = 'active'
+      WHERE a.email = $1
     `;
     const licenseResult = await pool.query(licenseQuery, [email]);
     const licenseCount = parseInt(licenseResult.rows[0]?.license_count || 0);
