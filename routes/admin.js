@@ -191,5 +191,110 @@ router.get("/status", async (req, res) => {
   }
 });
 
+// Retry failed builds
+router.post("/retry-failed-builds", async (req, res) => {
+  try {
+    console.log('🔄 Retrying failed builds...');
+    
+    // Find failed builds
+    const query = `
+      SELECT 
+        b.id,
+        b.tag,
+        b.license_id,
+        b.account_id,
+        l.license_key,
+        a.email
+      FROM builds b
+      JOIN licenses l ON l.id = b.license_id
+      JOIN accounts a ON a.id = l.account_id
+      WHERE b.status = 'failed'
+      ORDER BY b.created_at DESC
+    `;
+    
+    const { rows } = await pool.query(query);
+    
+    if (rows.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No failed builds to retry',
+        retriedBuilds: 0
+      });
+    }
+    
+    console.log(`🔄 Found ${rows.length} failed builds to retry`);
+    const retriedBuilds = [];
+    
+    for (const build of rows) {
+      console.log(`  - Retrying build ${build.id} (${build.tag}) for ${build.email}`);
+      
+      // Reset build to queued status
+      await pool.query(
+        'UPDATE builds SET status = $1, updated_at = NOW() WHERE id = $2',
+        ['queued', build.id]
+      );
+      
+      retriedBuilds.push({
+        buildId: build.id,
+        tag: build.tag,
+        email: build.email,
+        licenseKey: build.license_key
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: `Successfully queued ${retriedBuilds.length} failed builds for retry`,
+      retriedBuilds
+    });
+    
+  } catch (error) {
+    console.error('❌ Error retrying failed builds:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Get build status and logs
+router.get("/builds/:email", async (req, res) => {
+  try {
+    const { email } = req.params;
+    
+    const query = `
+      SELECT 
+        b.id,
+        b.status,
+        b.tag,
+        b.release_url,
+        b.asset_name,
+        b.created_at,
+        b.updated_at,
+        l.license_key,
+        a.email
+      FROM builds b
+      JOIN licenses l ON l.id = b.license_id
+      JOIN accounts a ON a.id = l.account_id
+      WHERE a.email = $1
+      ORDER BY b.created_at DESC
+    `;
+    
+    const { rows } = await pool.query(query, [email]);
+    
+    res.json({
+      success: true,
+      builds: rows
+    });
+    
+  } catch (error) {
+    console.error('❌ Error fetching builds:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 export default router;
 

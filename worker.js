@@ -4,7 +4,7 @@ import { sendLicenseEmail } from "./services/email.js"
 import { initializeDatabase } from "./scripts/deploy-init-db.js";
 
 const TICK_MS = 60_000; // 1 minute
-const WORKFLOW_FILE = process.env.GITHUB_WORKFLOW_FILE || "build-and-release.yml";
+const WORKFLOW_FILE = process.env.GITHUB_WORKFLOW_FILE || "build.yml";
 
 async function processQueuedBuild() {
   const { rows } = await pool.query(
