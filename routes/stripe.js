@@ -3,6 +3,7 @@ import express from "express";
 import Stripe from "stripe";
 import crypto from "node:crypto";
 import { pool } from "../db.js";
+import { sendWelcomeEmail, sendPaymentConfirmationEmail } from "../services/email.js";
 
 // Stripe needs the raw body; index.js already mounts `stripeRaw` before json()
 export const stripeRaw = express.raw({ type: "application/json" });
@@ -149,7 +150,7 @@ router.post("/", async (req, res) => {
   try {
     switch (event.type) {
       case "checkout.session.completed": {
-        // Session-level context (email + subscription id)
+        // Session-level context (email + subscription id) - DO NOT CREATE LICENSE YET
         const session = event.data.object;
         const email =
           session?.customer_details?.email ||
@@ -163,11 +164,61 @@ router.post("/", async (req, res) => {
             ? session.subscription
             : session.subscription?.id || null;
 
-        if (!email || !stripeCustomerId || !subscriptionId) {
+        if (!email || !stripeCustomerId) {
           await writeAudit({
             actor: "stripe",
             event: "CHECKOUT_COMPLETED_MISSING_FIELDS",
             context: { email, stripeCustomerId, subscriptionId }
+          });
+          break;
+        }
+
+        // Only create account, do NOT create license until payment is confirmed
+        const account = await upsertAccountByCustomer({ email, stripeCustomerId });
+
+        await writeAudit({
+          actor: "stripe",
+          accountId: account.id,
+          event: "CHECKOUT_COMPLETED_ACCOUNT_CREATED",
+          context: { subscriptionId, email }
+        });
+
+        break;
+      }
+
+      case "invoice.payment_succeeded": {
+        // This is the event that confirms payment was actually successful
+        const invoice = event.data.object;
+        const stripeCustomerId =
+          typeof invoice.customer === "string" ? invoice.customer : invoice.customer?.id || null;
+        const subscriptionId =
+          typeof invoice.subscription === "string"
+            ? invoice.subscription
+            : invoice.subscription?.id || null;
+
+        if (!stripeCustomerId || !subscriptionId) {
+          await writeAudit({
+            actor: "stripe",
+            event: "PAYMENT_SUCCEEDED_MISSING_FIELDS",
+            context: { stripeCustomerId, subscriptionId }
+          });
+          break;
+        }
+
+        // Get customer email
+        let email = null;
+        try {
+          const customer = await stripe.customers.retrieve(stripeCustomerId);
+          email = customer?.email || null;
+        } catch (e) {
+          console.error("Failed to retrieve customer:", e.message);
+        }
+
+        if (!email) {
+          await writeAudit({
+            actor: "stripe",
+            event: "PAYMENT_SUCCEEDED_NO_EMAIL",
+            context: { stripeCustomerId, subscriptionId }
           });
           break;
         }
@@ -188,17 +239,53 @@ router.post("/", async (req, res) => {
           currentPeriodEnd
         });
 
+        // NOW create license after payment confirmation
         const lic = await ensureLicenseForAccount({ accountId: account.id, blocks });
 
         // Trigger build for new license
         await triggerBuildForLicense(lic.id, account.id);
 
+        // Send welcome email with license information
+        try {
+          await sendWelcomeEmail({
+            to: email,
+            customerName: account.name || email.split('@')[0],
+            licenseKey: lic.license_key,
+            downloadUrl: `${process.env.FRONTEND_ORIGIN || 'https://syncsure.cloud'}/dashboard`,
+            maxDevices: lic.max_devices
+          });
+          
+          console.log(`[email] Welcome email sent to ${email} for license ${lic.license_key}`);
+        } catch (emailError) {
+          console.error(`[email] Failed to send welcome email to ${email}:`, emailError.message);
+          // Don't fail the webhook if email fails
+        }
+
+        // Send payment confirmation email
+        try {
+          const invoiceAmount = (invoice.amount_paid / 100).toFixed(2);
+          const nextBillingDate = new Date(sub.current_period_end * 1000).toLocaleDateString();
+          
+          await sendPaymentConfirmationEmail({
+            to: email,
+            customerName: account.name || email.split('@')[0],
+            amount: invoiceAmount,
+            invoiceId: invoice.id,
+            nextBilling: nextBillingDate
+          });
+          
+          console.log(`[email] Payment confirmation sent to ${email} for invoice ${invoice.id}`);
+        } catch (emailError) {
+          console.error(`[email] Failed to send payment confirmation to ${email}:`, emailError.message);
+          // Don't fail the webhook if email fails
+        }
+
         await writeAudit({
           actor: "stripe",
           accountId: account.id,
           licenseId: lic.id,
-          event: "CHECKOUT_COMPLETED_UPSERT",
-          context: { subscriptionId: sub.id, blocks, status }
+          event: "PAYMENT_SUCCEEDED_LICENSE_CREATED",
+          context: { subscriptionId: sub.id, blocks, status, invoiceId: invoice.id, emailsSent: true }
         });
 
         break;
@@ -206,6 +293,7 @@ router.post("/", async (req, res) => {
 
       case "customer.subscription.created":
       case "customer.subscription.updated": {
+        // Only update subscription data, do NOT create license until payment confirmed
         const sub = event.data.object; // full stripe subscription
         const stripeCustomerId =
           typeof sub.customer === "string" ? sub.customer : sub.customer?.id || null;
@@ -234,13 +322,11 @@ router.post("/", async (req, res) => {
           currentPeriodEnd
         });
 
-        const lic = await ensureLicenseForAccount({ accountId: account.id, blocks });
-
+        // Do NOT create license here - wait for payment confirmation
         await writeAudit({
           actor: "stripe",
           accountId: account.id,
-          licenseId: lic.id,
-          event: event.type.toUpperCase(),
+          event: event.type.toUpperCase() + "_NO_LICENSE",
           context: { subscriptionId: sub.id, blocks, status }
         });
 
@@ -361,54 +447,87 @@ router.get("/subscription", async (req, res) => {
 
     const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-    // Find customer by email
+    // 1) Find customer by email
     const customers = await stripe.customers.list({
       email: email,
       limit: 1
     });
 
-    if (customers.data.length === 0) {
+    const customer = customers.data[0];
+    if (!customer) {
       return res.json({
         active: false,
         licenseCount: 0,
         deviceCount: 0,
+        customerId: null,
+        subscriptionId: null,
+        nextBilling: null,
         invoices: []
       });
     }
 
-    const customer = customers.data[0];
-
-    // Get active subscriptions
+    // 2) List ACTIVE subscriptions only
     const subscriptions = await stripe.subscriptions.list({
       customer: customer.id,
       status: 'active',
-      limit: 10
+      expand: ['data.items.data.price']
     });
 
-    // Get recent invoices
-    const invoices = await stripe.invoices.list({
+    if (subscriptions.data.length === 0) {
+      return res.json({
+        active: false,
+        licenseCount: 0,
+        deviceCount: 0,
+        customerId: customer.id,
+        subscriptionId: null,
+        nextBilling: null,
+        invoices: []
+      });
+    }
+
+    // 2.5) CRITICAL: Check for successful payments - subscription can be 'active' but have no payments
+    const paidInvoices = await stripe.invoices.list({
       customer: customer.id,
-      limit: 10
+      status: 'paid',
+      limit: 100
     });
 
-    // Get license count from database
-    const licenseQuery = `
-      SELECT COUNT(*) as license_count 
-      FROM licenses l
-      JOIN accounts a ON l.account_id = a.id
-      WHERE a.email = $1
-    `;
-    const licenseResult = await pool.query(licenseQuery, [email]);
-    const licenseCount = parseInt(licenseResult.rows[0]?.license_count || 0);
+    // If no paid invoices, customer has no valid licenses regardless of subscription status
+    if (paidInvoices.data.length === 0) {
+      return res.json({
+        active: false,
+        licenseCount: 0,
+        deviceCount: 0,
+        customerId: customer.id,
+        subscriptionId: subscriptions.data[0]?.id ?? null,
+        nextBilling: null,
+        invoices: []
+      });
+    }
 
-    // Get device count (placeholder - would come from device heartbeats)
-    const deviceCount = 0; // TODO: Implement device counting
+    // 3) Sum quantities (seats) from Stripe subscriptions - but only if payments exist
+    const licenseCount = subscriptions.data.reduce((sum, sub) => {
+      const qty = sub.items.data.reduce((s, item) => s + (item.quantity ?? 0), 0);
+      return sum + qty;
+    }, 0);
+
+    const nextBilling = subscriptions.data[0]?.current_period_end
+      ? new Date(subscriptions.data[0].current_period_end * 1000).toLocaleDateString()
+      : null;
+
+    // Get recent invoices (use the paid invoices we already fetched)
+    const invoices = paidInvoices;
+
+    // Get device count from database (this is fine to get from DB)
+    const deviceCount = 0; // TODO: Implement device counting from heartbeats
 
     const subscriptionData = {
-      active: subscriptions.data.length > 0,
-      licenseCount: licenseCount,
+      active: licenseCount > 0,
+      licenseCount: licenseCount, // Now comes from Stripe, not DB
       deviceCount: deviceCount,
-      nextBilling: subscriptions.data[0] ? new Date(subscriptions.data[0].current_period_end * 1000).toLocaleDateString() : null,
+      customerId: customer.id,
+      subscriptionId: subscriptions.data[0]?.id ?? null,
+      nextBilling: nextBilling,
       invoices: invoices.data.map(invoice => ({
         id: invoice.id,
         description: invoice.lines.data[0]?.description || 'SyncSure Monitor',

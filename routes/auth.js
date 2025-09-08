@@ -62,13 +62,8 @@ router.post("/register", async (req, res) => {
 
     const accountData = account.rows[0];
 
-    // Create default license for the account
-    const licenseKey = `SYNC-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
-    const license = await pool.query(`
-      INSERT INTO licenses (account_id, license_key, max_devices, plan_type, price_per_device, company_name)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING *
-    `, [accountData.id, licenseKey, 10, 'starter', 1.99, companyName || 'Default Company']);
+    // DO NOT create default license - customers start with 0 licenses
+    // Licenses are only created after successful payment via Stripe webhooks
 
     // Generate JWT token
     const token = jwt.sign(
@@ -90,7 +85,7 @@ router.post("/register", async (req, res) => {
         name: accountData.name,
         companyName: companyName
       },
-      license: license.rows[0],
+      licenseCount: 0, // New accounts start with 0 licenses
       token: token
     });
 
