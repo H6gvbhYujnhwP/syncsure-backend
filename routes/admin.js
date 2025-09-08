@@ -191,6 +191,72 @@ router.get("/status", async (req, res) => {
   }
 });
 
+// Force retry building builds (reset to queued)
+router.post("/force-retry-builds", async (req, res) => {
+  try {
+    console.log('🔄 Force retrying building builds...');
+    
+    // Find building builds
+    const query = `
+      SELECT 
+        b.id,
+        b.tag,
+        b.license_id,
+        b.account_id,
+        l.license_key,
+        a.email
+      FROM builds b
+      JOIN licenses l ON l.id = b.license_id
+      JOIN accounts a ON a.id = l.account_id
+      WHERE b.status = 'building'
+      ORDER BY b.created_at DESC
+    `;
+    
+    const { rows } = await pool.query(query);
+    
+    if (rows.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No building builds to force retry',
+        retriedBuilds: 0
+      });
+    }
+    
+    console.log(`🔄 Found ${rows.length} building builds to force retry`);
+    const retriedBuilds = [];
+    
+    for (const build of rows) {
+      console.log(`  - Force retrying build ${build.id} (${build.tag}) for ${build.email}`);
+      
+      // Reset build to queued status
+      await pool.query(
+        'UPDATE builds SET status = $1, updated_at = NOW() WHERE id = $2',
+        ['queued', build.id]
+      );
+      
+      retriedBuilds.push({
+        buildId: build.id,
+        tag: build.tag,
+        email: build.email,
+        licenseKey: build.license_key
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: `Successfully queued ${retriedBuilds.length} building builds for force retry`,
+      retriedBuilds
+    });
+    
+  } catch (error) {
+    console.error('❌ Error force retrying builds:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // Retry failed builds
 router.post("/retry-failed-builds", async (req, res) => {
   try {
