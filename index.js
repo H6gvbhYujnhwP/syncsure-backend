@@ -44,6 +44,7 @@ app.use("/api/licenses", licensesRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/migration", migrationRouter);
 app.use("/api/builds", buildsRouter);
+app.use("/api/stripe", stripeRouter);
 
 app.get("/", (_req, res) => {
   res.type("text").send("SyncSure Backend is running 🚀");
