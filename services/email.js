@@ -205,9 +205,9 @@ export async function sendPaymentConfirmationEmail({ to, customerName, amount, i
 }
 
 /**
- * Generic email sending function
+ * Generic email sending function with custom sender addresses
  */
-async function sendEmail({ to, template, data }) {
+async function sendEmail({ to, template, data, from = null }) {
   if (!RESEND_API_KEY) {
     console.log("[email] RESEND_API_KEY not set — skipping send");
     return { skipped: true };
@@ -218,8 +218,11 @@ async function sendEmail({ to, template, data }) {
     throw new Error(`Unknown email template: ${template}`);
   }
 
+  // Use custom sender addresses based on email type
+  const senderAddress = from || getSenderAddress(template);
+
   const body = {
-    from: "SyncSure <noreply@syncsure.cloud>",
+    from: senderAddress,
     to: [to],
     subject: emailTemplate.subject,
     html: emailTemplate.getHtml(data)
@@ -241,11 +244,28 @@ async function sendEmail({ to, template, data }) {
     }
 
     const result = await res.json();
-    console.log(`[email] Sent ${template} email to ${to}:`, result.id);
+    console.log(`[email] Sent ${template} email to ${to} from ${senderAddress}:`, result.id);
     return result;
   } catch (error) {
     console.error(`[email] Failed to send ${template} email to ${to}:`, error.message);
     throw error;
+  }
+}
+
+/**
+ * Get appropriate sender address based on email type
+ */
+function getSenderAddress(template) {
+  switch (template) {
+    case 'welcome':
+    case 'paymentConfirmation':
+    case 'buildComplete':
+      return "SyncSure Accounts <accounts@syncsure.cloud>";
+    case 'deviceAlert':
+    case 'systemAlert':
+      return "SyncSure Alerts <alerts@syncsure.cloud>";
+    default:
+      return "SyncSure <noreply@syncsure.cloud>";
   }
 }
 
