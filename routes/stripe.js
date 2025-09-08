@@ -9,6 +9,17 @@ import { sendWelcomeEmail, sendPaymentConfirmationEmail } from "../services/emai
 export const stripeRaw = express.raw({ type: "application/json" });
 const router = express.Router();
 
+// CRITICAL: Prevent caching of sensitive subscription/license data
+router.use((req, res, next) => {
+  res.set({
+    'Cache-Control': 'no-store, no-cache, must-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0',
+    'Vary': 'Authorization' // Prevent sharing across users/CDN
+  });
+  next();
+});
+
 // ---- Helpers ----
 
 // simple license key generator (deterministic length, uppercase)
