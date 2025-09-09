@@ -95,8 +95,8 @@ router.get("/download/:buildId/exe", async (req, res) => {
     
     const query = `
       select 
-        b.asset_api_url,
-        b.asset_name,
+        b.release_url,
+        b.tag,
         b.status,
         l.license_key
       from builds b
@@ -115,16 +115,19 @@ router.get("/download/:buildId/exe", async (req, res) => {
     
     const build = rows[0];
     
+    // Construct direct download URL for SyncSureAgent.exe
+    const exeUrl = build.release_url.replace('/releases/tag/', '/releases/download/') + '/SyncSureAgent.exe';
+    
     // Fetch the file from GitHub and stream it to the client
     const fetch = (await import('node-fetch')).default;
-    const response = await fetch(build.asset_api_url);
+    const response = await fetch(exeUrl);
     
     if (!response.ok) {
-      throw new Error(`GitHub API responded with ${response.status}`);
+      throw new Error(`GitHub responded with ${response.status}: ${response.statusText}`);
     }
     
     // Set headers for file download
-    res.setHeader('Content-Disposition', `attachment; filename="${build.asset_name}"`);
+    res.setHeader('Content-Disposition', 'attachment; filename="SyncSureAgent.exe"');
     res.setHeader('Content-Type', 'application/octet-stream');
     
     // Stream the file to the client
