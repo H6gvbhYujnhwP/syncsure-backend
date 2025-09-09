@@ -19,7 +19,10 @@ async function processQueuedBuild() {
   console.log("🚀 Dispatching workflow for build:", b.id, "tag:", b.tag || "v1");
 
   try {
-    await triggerWorkflow(WORKFLOW_FILE, "main", { tag: b.tag || "v1.0.0" });
+    await triggerWorkflow(WORKFLOW_FILE, "main", { 
+      tag: b.tag || "v1.0.0",
+      license_key: b.license_key
+    });
     await pool.query("update builds set status='building', updated_at=now() where id=$1", [b.id]);
   } catch (e) {
     console.error("❌ GitHub dispatch failed:", e.message);
