@@ -22,11 +22,11 @@ router.use((req, res, next) => {
 
 // ---- Helpers ----
 
-// simple license key generator (deterministic length, uppercase)
+// Generate license key in SYNC-xxxxxxxxxx-xxxxxxxx format
 function generateLicenseKey() {
-  const buf = crypto.randomBytes(16).toString("hex").toUpperCase(); // 32 hex chars
-  // group like ABCD-EFGH-...
-  return buf.match(/.{1,4}/g).join("-");
+  const part1 = crypto.randomBytes(5).toString("hex").toUpperCase(); // 10 hex chars
+  const part2 = crypto.randomBytes(4).toString("hex").toUpperCase(); // 8 hex chars
+  return `SYNC-${part1}-${part2}`;
 }
 
 async function upsertAccountByCustomer({ email, stripeCustomerId }) {
@@ -107,19 +107,35 @@ async function writeAudit({ actor, accountId, licenseId, event, context = {} }) 
 }
 
 async function triggerBuildForLicense(licenseId, accountId) {
-  // Create a build record to trigger the worker
+  // Check if a build already exists for this license
+  const existingBuildQuery = `
+    SELECT id, tag, status FROM builds 
+    WHERE license_id = $1 
+    ORDER BY created_at DESC 
+    LIMIT 1
+  `;
+  
+  const { rows: existingBuilds } = await pool.query(existingBuildQuery, [licenseId]);
+  
+  if (existingBuilds.length > 0) {
+    const existingBuild = existingBuilds[0];
+    console.log(`🔄 Build already exists for license ${licenseId}: ${existingBuild.tag} (status: ${existingBuild.status})`);
+    return existingBuild;
+  }
+  
+  // Create new build only if none exists
   const tag = `license-${licenseId}-${Date.now()}`;
   
   const buildQuery = `
-    insert into builds (license_id, account_id, status, tag)
-    values ($1, $2, 'queued', $3)
-    returning id, tag
+    INSERT INTO builds (license_id, account_id, status, tag)
+    VALUES ($1, $2, 'queued', $3)
+    RETURNING id, tag
   `;
   
   const { rows } = await pool.query(buildQuery, [licenseId, accountId, tag]);
   const build = rows[0];
   
-  console.log(`🏗️ Build queued for license ${licenseId}: ${build.tag}`);
+  console.log(`🏗️ New build queued for license ${licenseId}: ${build.tag}`);
   return build;
 }
 
