@@ -88,5 +88,165 @@ router.get("/download/:buildId", async (req, res) => {
   }
 });
 
+// Direct download proxy for SyncSureAgent.exe
+router.get("/download/:buildId/exe", async (req, res) => {
+  try {
+    const { buildId } = req.params;
+    
+    const query = `
+      select 
+        b.asset_api_url,
+        b.asset_name,
+        b.status,
+        l.license_key
+      from builds b
+      join licenses l on l.id = b.license_id
+      where b.id = $1 and b.status = 'released'
+    `;
+    
+    const { rows } = await pool.query(query, [buildId]);
+    
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "Build not found or not ready"
+      });
+    }
+    
+    const build = rows[0];
+    
+    // Fetch the file from GitHub and stream it to the client
+    const fetch = (await import('node-fetch')).default;
+    const response = await fetch(build.asset_api_url);
+    
+    if (!response.ok) {
+      throw new Error(`GitHub API responded with ${response.status}`);
+    }
+    
+    // Set headers for file download
+    res.setHeader('Content-Disposition', `attachment; filename="${build.asset_name}"`);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    
+    // Stream the file to the client
+    response.body.pipe(res);
+    
+  } catch (error) {
+    console.error("Error downloading exe file:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to download file"
+    });
+  }
+});
+
+// Direct download proxy for SHA256 hash file
+router.get("/download/:buildId/hash", async (req, res) => {
+  try {
+    const { buildId } = req.params;
+    
+    const query = `
+      select 
+        b.release_url,
+        b.tag,
+        b.status,
+        l.license_key
+      from builds b
+      join licenses l on l.id = b.license_id
+      where b.id = $1 and b.status = 'released'
+    `;
+    
+    const { rows } = await pool.query(query, [buildId]);
+    
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "Build not found or not ready"
+      });
+    }
+    
+    const build = rows[0];
+    
+    // Construct SHA256 file URL
+    const hashUrl = build.release_url.replace('/releases/tag/', '/releases/download/') + '/SyncSureAgent.exe.sha256';
+    
+    // Fetch the hash file from GitHub
+    const fetch = (await import('node-fetch')).default;
+    const response = await fetch(hashUrl);
+    
+    if (!response.ok) {
+      throw new Error(`GitHub API responded with ${response.status}`);
+    }
+    
+    // Set headers for file download
+    res.setHeader('Content-Disposition', 'attachment; filename="SyncSureAgent.exe.sha256"');
+    res.setHeader('Content-Type', 'text/plain');
+    
+    // Stream the file to the client
+    response.body.pipe(res);
+    
+  } catch (error) {
+    console.error("Error downloading hash file:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to download hash file"
+    });
+  }
+});
+
+// Direct download proxy for PowerShell script
+router.get("/download/:buildId/script", async (req, res) => {
+  try {
+    const { buildId } = req.params;
+    
+    const query = `
+      select 
+        b.release_url,
+        b.tag,
+        b.status,
+        l.license_key,
+        l.max_devices
+      from builds b
+      join licenses l on l.id = b.license_id
+      where b.id = $1 and b.status = 'released'
+    `;
+    
+    const { rows } = await pool.query(query, [buildId]);
+    
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "Build not found or not ready"
+      });
+    }
+    
+    const build = rows[0];
+    
+    // Construct PowerShell script URL
+    const scriptUrl = build.release_url.replace('/releases/tag/', '/releases/download/') + '/deploy-syncsure-agent.ps1';
+    
+    // Fetch the script file from GitHub
+    const fetch = (await import('node-fetch')).default;
+    const response = await fetch(scriptUrl);
+    
+    if (!response.ok) {
+      throw new Error(`GitHub API responded with ${response.status}`);
+    }
+    
+    // Set headers for file download
+    res.setHeader('Content-Disposition', 'attachment; filename="deploy-syncsure-agent.ps1"');
+    res.setHeader('Content-Type', 'text/plain');
+    
+    // Stream the file to the client
+    response.body.pipe(res);
+    
+  } catch (error) {
+    console.error("Error downloading script file:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to download script file"
+    });
+  }
+});
+
 export default router;
 
