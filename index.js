@@ -74,6 +74,9 @@ app.use("/api/stripe", stripeRouter);
 app.use("/api/agent", agentRouter);
 app.use("/api/dashboard", dashboardRouter);
 
+// Backward compatibility routes for existing agents
+app.use("/api", agentRouter); // This allows /api/bind, /api/heartbeat to work
+
 app.get("/", (_req, res) => {
   res.type("text").send("SyncSure Backend is running 🚀");
 });
