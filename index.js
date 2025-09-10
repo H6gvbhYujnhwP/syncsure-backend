@@ -9,6 +9,7 @@ import migrationRouter from "./routes/migration.js";
 import buildsRouter from "./routes/builds.js";
 import adminRouter from "./routes/admin.js";
 import stripeRouter, { stripeRaw } from "./routes/stripe.js";
+import agentRouter from "./routes/agent.js";
 import { initializeDatabase } from "./scripts/deploy-init-db.js";
 
 const app = express();
@@ -47,6 +48,7 @@ app.use("/api/migration", migrationRouter);
 app.use("/api/builds", buildsRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/stripe", stripeRouter);
+app.use("/api", agentRouter);
 
 app.get("/", (_req, res) => {
   res.type("text").send("SyncSure Backend is running 🚀");
