@@ -10,14 +10,37 @@ import buildsRouter from "./routes/builds.js";
 import adminRouter from "./routes/admin.js";
 import stripeRouter, { stripeRaw } from "./routes/stripe.js";
 import agentRouter from "./routes/agent.js";
+import dashboardRouter from "./routes/dashboard.js";
 import { initializeDatabase } from "./scripts/deploy-init-db.js";
 
 const app = express();
 const port = process.env.PORT || 10000;
 
-// CORS Configuration - Allow all origins for now
+// Trust proxy for Render deployment (required for rate limiting and correct client IPs)
+app.set('trust proxy', 1);
+
+// CORS Configuration - SyncSure V8 Blueprint Compliant
+const allowedOrigins = [
+  'https://syncsure.cloud',
+  'https://syncsure-website.onrender.com',
+  'https://syncsure-dashboard.onrender.com',
+  'http://localhost:5173',  // Vite dev server
+  'http://localhost:3000',  // React dev server
+  'http://localhost:8080'   // Alternative dev server
+];
+
 app.use(cors({
-  origin: true, // Allow all origins
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, Postman, agent)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    } else {
+      console.log(`🚫 CORS blocked origin: ${origin}`);
+      return callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
@@ -48,7 +71,8 @@ app.use("/api/migration", migrationRouter);
 app.use("/api/builds", buildsRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/stripe", stripeRouter);
-app.use("/api", agentRouter);
+app.use("/api/agent", agentRouter);
+app.use("/api/dashboard", dashboardRouter);
 
 app.get("/", (_req, res) => {
   res.type("text").send("SyncSure Backend is running 🚀");
