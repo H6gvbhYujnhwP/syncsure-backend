@@ -16,13 +16,27 @@ router.use((req, res, next) => {
 // POST /api/bind - Device binding endpoint
 router.post("/bind", async (req, res) => {
   try {
-    const { licenseKey, deviceHash, DeviceHash, deviceName, agentVersion, platform, operatingSystem, architecture } = req.body;
+    const { 
+      licenseKey, LicenseKey,           // Support both camelCase and PascalCase
+      deviceHash, DeviceHash,           // Support both camelCase and PascalCase
+      deviceName, DeviceName,           // Support both camelCase and PascalCase
+      agentVersion, AgentVersion,       // Support both camelCase and PascalCase
+      platform, Platform,               // Support both camelCase and PascalCase
+      operatingSystem, OperatingSystem, // Support both camelCase and PascalCase
+      architecture, Architecture        // Support both camelCase and PascalCase
+    } = req.body;
 
-    // Support both deviceHash (lowercase) and DeviceHash (uppercase) for compatibility
+    // Support both field name formats (C# PascalCase and JavaScript camelCase)
+    const actualLicenseKey = licenseKey || LicenseKey;
     const actualDeviceHash = deviceHash || DeviceHash;
+    const actualDeviceName = deviceName || DeviceName;
+    const actualAgentVersion = agentVersion || AgentVersion;
+    const actualPlatform = platform || Platform;
+    const actualOperatingSystem = operatingSystem || OperatingSystem;
+    const actualArchitecture = architecture || Architecture;
 
     // Validate required fields
-    if (!licenseKey || !actualDeviceHash) {
+    if (!actualLicenseKey || !actualDeviceHash) {
       return res.status(400).json({ 
         success: false, 
         error: "License key and device hash are required" 
@@ -30,7 +44,7 @@ router.post("/bind", async (req, res) => {
     }
 
     // Validate license key format (SYNC-xxxxxxxxxx-xxxxxxxx)
-    if (!licenseKey.match(/^SYNC-[A-Za-z0-9]+-[A-Za-z0-9]+$/)) {
+    if (!actualLicenseKey.match(/^SYNC-[A-Za-z0-9]+-[A-Za-z0-9]+$/)) {
       return res.status(400).json({ 
         success: false, 
         error: "Invalid license key format" 
@@ -43,7 +57,7 @@ router.post("/bind", async (req, res) => {
       FROM licenses 
       WHERE license_key = $1
     `;
-    const licenseResult = await pool.query(licenseQuery, [licenseKey]);
+    const licenseResult = await pool.query(licenseQuery, [actualLicenseKey]);
 
     if (licenseResult.rows.length === 0) {
       return res.status(400).json({ 
@@ -72,14 +86,14 @@ router.post("/bind", async (req, res) => {
       `;
       
       const systemInfo = {
-        platform: platform || 'windows',
-        operatingSystem: operatingSystem || '',
-        architecture: architecture || 'x64'
+        platform: actualPlatform || 'windows',
+        operatingSystem: actualOperatingSystem || '',
+        architecture: actualArchitecture || 'x64'
       };
       
       await pool.query(updateQuery, [
-        deviceName || null, 
-        agentVersion || null, 
+        actualDeviceName || null, 
+        actualAgentVersion || null, 
         JSON.stringify(systemInfo),
         license.id, 
         actualDeviceHash
@@ -109,16 +123,16 @@ router.post("/bind", async (req, res) => {
     `;
     
     const systemInfo = {
-      platform: platform || 'windows',
-      operatingSystem: operatingSystem || '',
-      architecture: architecture || 'x64'
+      platform: actualPlatform || 'windows',
+      operatingSystem: actualOperatingSystem || '',
+      architecture: actualArchitecture || 'x64'
     };
     
     const insertResult = await pool.query(insertQuery, [
       license.id, 
       actualDeviceHash, 
-      deviceName || null, 
-      agentVersion || null,
+      actualDeviceName || null, 
+      actualAgentVersion || null,
       JSON.stringify(systemInfo)
     ]);
 
@@ -143,11 +157,11 @@ router.post("/bind", async (req, res) => {
       license.id,
       JSON.stringify({
         device_id: actualDeviceHash,
-        device_name: deviceName,
-        agent_version: agentVersion,
-        platform: platform,
-        operating_system: operatingSystem,
-        architecture: architecture
+        device_name: actualDeviceName,
+        agent_version: actualAgentVersion,
+        platform: actualPlatform,
+        operating_system: actualOperatingSystem,
+        architecture: actualArchitecture
       })
     ]);
 
@@ -171,12 +185,24 @@ router.post("/bind", async (req, res) => {
 // POST /api/heartbeat - Device heartbeat endpoint
 router.post("/heartbeat", async (req, res) => {
   try {
-    const { licenseKey, deviceHash, DeviceHash, timestamp, status, systemMetrics, agentVersion } = req.body;
+    const { 
+      licenseKey, LicenseKey,           // Support both camelCase and PascalCase
+      deviceHash, DeviceHash,           // Support both camelCase and PascalCase
+      timestamp, Timestamp,             // Support both camelCase and PascalCase
+      status, Status,                   // Support both camelCase and PascalCase
+      systemMetrics, SystemMetrics,     // Support both camelCase and PascalCase
+      agentVersion, AgentVersion        // Support both camelCase and PascalCase
+    } = req.body;
 
-    // Support both deviceHash (lowercase) and DeviceHash (uppercase) for compatibility
+    // Support both field name formats (C# PascalCase and JavaScript camelCase)
+    const actualLicenseKey = licenseKey || LicenseKey;
     const actualDeviceHash = deviceHash || DeviceHash;
+    const actualTimestamp = timestamp || Timestamp;
+    const actualStatus = status || Status;
+    const actualSystemMetrics = systemMetrics || SystemMetrics;
+    const actualAgentVersion = agentVersion || AgentVersion;
 
-    if (!licenseKey || !actualDeviceHash) {
+    if (!actualLicenseKey || !actualDeviceHash) {
       return res.status(400).json({ 
         success: false, 
         error: "License key and device hash are required" 
@@ -190,7 +216,7 @@ router.post("/heartbeat", async (req, res) => {
       JOIN licenses l ON db.license_id = l.id
       WHERE l.license_key = $1 AND db.device_id = $2 AND db.status = 'active'
     `;
-    const bindingResult = await pool.query(bindingQuery, [licenseKey, actualDeviceHash]);
+    const bindingResult = await pool.query(bindingQuery, [actualLicenseKey, actualDeviceHash]);
 
     if (bindingResult.rows.length === 0) {
       return res.status(400).json({ 
@@ -210,8 +236,8 @@ router.post("/heartbeat", async (req, res) => {
       WHERE id = $3
     `;
     await pool.query(updateQuery, [
-      agentVersion,
-      systemMetrics ? JSON.stringify(systemMetrics) : null,
+      actualAgentVersion,
+      actualSystemMetrics ? JSON.stringify(actualSystemMetrics) : null,
       binding.id
     ]);
 
