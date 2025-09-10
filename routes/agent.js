@@ -53,7 +53,7 @@ router.post("/bind", async (req, res) => {
 
     // Find license
     const licenseQuery = `
-      SELECT id, max_devices, bound_count, account_id
+      SELECT id, device_count, bound_count, account_id, pricing_tier
       FROM licenses 
       WHERE license_key = $1
     `;
@@ -107,10 +107,10 @@ router.post("/bind", async (req, res) => {
     }
 
     // Check device limit for new bindings
-    if (license.bound_count >= license.max_devices) {
+    if (license.bound_count >= license.device_count) {
       return res.status(400).json({ 
         success: false, 
-        error: `Device limit exceeded. Maximum ${license.max_devices} devices allowed.` 
+        error: `Device limit exceeded. Maximum ${license.device_count} devices allowed for ${license.pricing_tier}.` 
       });
     }
 
@@ -169,7 +169,8 @@ router.post("/bind", async (req, res) => {
       success: true, 
       message: "Device bound successfully",
       deviceId: actualDeviceHash,
-      maxDevices: license.max_devices,
+      pricingTier: license.pricing_tier,
+      deviceCount: license.device_count,
       boundCount: license.bound_count + 1
     });
 
@@ -311,8 +312,9 @@ router.get("/status", async (req, res) => {
     const statusQuery = `
       SELECT 
         l.license_key,
-        l.max_devices,
+        l.device_count,
         l.bound_count,
+        l.pricing_tier,
         l.last_sync,
         COUNT(db.id) as active_devices,
         JSON_AGG(
@@ -327,7 +329,7 @@ router.get("/status", async (req, res) => {
       FROM licenses l
       LEFT JOIN device_bindings db ON l.id = db.license_id
       WHERE l.license_key = $1
-      GROUP BY l.id, l.license_key, l.max_devices, l.bound_count, l.last_sync
+      GROUP BY l.id, l.license_key, l.device_count, l.bound_count, l.pricing_tier, l.last_sync
     `;
     const result = await pool.query(statusQuery, [licenseKey]);
 

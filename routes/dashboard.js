@@ -32,8 +32,9 @@ router.get("/devices", async (req, res) => {
       SELECT 
         l.id,
         l.license_key,
-        l.max_devices,
+        l.device_count,
         l.bound_count,
+        l.pricing_tier,
         l.last_sync,
         l.status as license_status,
         a.email as account_email
@@ -82,7 +83,8 @@ router.get("/devices", async (req, res) => {
       success: true,
       license: {
         license_key: license.license_key,
-        max_devices: license.max_devices,
+        device_count: license.device_count,
+        pricing_tier: license.pricing_tier,
         bound_count: license.bound_count,
         active_devices: activeDevices,
         last_sync: license.last_sync,
@@ -104,8 +106,9 @@ router.get("/devices", async (req, res) => {
         total_devices: devicesResult.rows.length,
         active_devices: activeDevices,
         inactive_devices: devicesResult.rows.length - activeDevices,
-        max_devices: license.max_devices,
-        utilization_percentage: Math.round((devicesResult.rows.length / license.max_devices) * 100)
+        device_count: license.device_count,
+        pricing_tier: license.pricing_tier,
+        utilization_percentage: Math.round((devicesResult.rows.length / license.device_count) * 100)
       }
     };
 
@@ -136,7 +139,8 @@ router.get("/stats", async (req, res) => {
     const statsQuery = `
       SELECT 
         l.license_key,
-        l.max_devices,
+        l.device_count,
+        l.pricing_tier,
         l.bound_count,
         l.last_sync,
         COUNT(db.id) as total_devices,
@@ -146,7 +150,7 @@ router.get("/stats", async (req, res) => {
       FROM licenses l
       LEFT JOIN device_bindings db ON l.id = db.license_id
       WHERE l.license_key = $1 AND l.status = 'active'
-      GROUP BY l.id, l.license_key, l.max_devices, l.bound_count, l.last_sync
+      GROUP BY l.id, l.license_key, l.device_count, l.pricing_tier, l.bound_count, l.last_sync
     `;
     
     const statsResult = await pool.query(statsQuery, [licenseKey]);
@@ -164,13 +168,14 @@ router.get("/stats", async (req, res) => {
       success: true,
       stats: {
         license_key: stats.license_key,
-        max_devices: parseInt(stats.max_devices),
+        device_count: parseInt(stats.device_count),
+        pricing_tier: stats.pricing_tier,
         bound_count: parseInt(stats.bound_count),
         total_devices: parseInt(stats.total_devices),
         active_devices: parseInt(stats.active_devices),
         healthy_devices: parseInt(stats.healthy_devices),
         inactive_devices: parseInt(stats.total_devices) - parseInt(stats.active_devices),
-        utilization_percentage: Math.round((parseInt(stats.total_devices) / parseInt(stats.max_devices)) * 100),
+        utilization_percentage: Math.round((parseInt(stats.total_devices) / parseInt(stats.device_count)) * 100),
         last_sync: stats.last_sync,
         latest_heartbeat: stats.latest_heartbeat
       }
