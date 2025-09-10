@@ -16,10 +16,13 @@ router.use((req, res, next) => {
 // POST /api/bind - Device binding endpoint
 router.post("/bind", async (req, res) => {
   try {
-    const { licenseKey, deviceHash, deviceName, agentVersion, platform, operatingSystem, architecture } = req.body;
+    const { licenseKey, deviceHash, DeviceHash, deviceName, agentVersion, platform, operatingSystem, architecture } = req.body;
+
+    // Support both deviceHash (lowercase) and DeviceHash (uppercase) for compatibility
+    const actualDeviceHash = deviceHash || DeviceHash;
 
     // Validate required fields
-    if (!licenseKey || !deviceHash) {
+    if (!licenseKey || !actualDeviceHash) {
       return res.status(400).json({ 
         success: false, 
         error: "License key and device hash are required" 
@@ -56,7 +59,7 @@ router.post("/bind", async (req, res) => {
       SELECT id, status FROM device_bindings 
       WHERE license_id = $1 AND device_id = $2
     `;
-    const existingResult = await pool.query(existingBindingQuery, [license.id, deviceHash]);
+    const existingResult = await pool.query(existingBindingQuery, [license.id, actualDeviceHash]);
 
     if (existingResult.rows.length > 0) {
       // Update existing binding
@@ -79,13 +82,13 @@ router.post("/bind", async (req, res) => {
         agentVersion || null, 
         JSON.stringify(systemInfo),
         license.id, 
-        deviceHash
+        actualDeviceHash
       ]);
 
       return res.json({ 
         success: true, 
         message: "Device binding updated successfully",
-        deviceId: deviceHash
+        deviceId: actualDeviceHash
       });
     }
 
@@ -113,7 +116,7 @@ router.post("/bind", async (req, res) => {
     
     const insertResult = await pool.query(insertQuery, [
       license.id, 
-      deviceHash, 
+      actualDeviceHash, 
       deviceName || null, 
       agentVersion || null,
       JSON.stringify(systemInfo)
@@ -139,7 +142,7 @@ router.post("/bind", async (req, res) => {
       license.account_id,
       license.id,
       JSON.stringify({
-        device_id: deviceHash,
+        device_id: actualDeviceHash,
         device_name: deviceName,
         agent_version: agentVersion,
         platform: platform,
@@ -151,7 +154,7 @@ router.post("/bind", async (req, res) => {
     res.json({ 
       success: true, 
       message: "Device bound successfully",
-      deviceId: deviceHash,
+      deviceId: actualDeviceHash,
       maxDevices: license.max_devices,
       boundCount: license.bound_count + 1
     });
@@ -168,9 +171,12 @@ router.post("/bind", async (req, res) => {
 // POST /api/heartbeat - Device heartbeat endpoint
 router.post("/heartbeat", async (req, res) => {
   try {
-    const { licenseKey, deviceHash, timestamp, status, systemMetrics, agentVersion } = req.body;
+    const { licenseKey, deviceHash, DeviceHash, timestamp, status, systemMetrics, agentVersion } = req.body;
 
-    if (!licenseKey || !deviceHash) {
+    // Support both deviceHash (lowercase) and DeviceHash (uppercase) for compatibility
+    const actualDeviceHash = deviceHash || DeviceHash;
+
+    if (!licenseKey || !actualDeviceHash) {
       return res.status(400).json({ 
         success: false, 
         error: "License key and device hash are required" 
@@ -184,7 +190,7 @@ router.post("/heartbeat", async (req, res) => {
       JOIN licenses l ON db.license_id = l.id
       WHERE l.license_key = $1 AND db.device_id = $2 AND db.status = 'active'
     `;
-    const bindingResult = await pool.query(bindingQuery, [licenseKey, deviceHash]);
+    const bindingResult = await pool.query(bindingQuery, [licenseKey, actualDeviceHash]);
 
     if (bindingResult.rows.length === 0) {
       return res.status(400).json({ 
