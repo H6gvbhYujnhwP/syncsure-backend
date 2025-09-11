@@ -1,8 +1,17 @@
 import express from "express";
 import { pool } from "../db.js";
-import bcrypt from "bcrypt";
 
 const router = express.Router();
+
+// Simple password hashing (for development - replace with proper hashing in production)
+const simpleHash = (password) => {
+  // Simple hash for development - NOT secure for production
+  return Buffer.from(password).toString('base64');
+};
+
+const verifyPassword = (password, hash) => {
+  return simpleHash(password) === hash;
+};
 
 // Database migration endpoint
 router.post("/migrate-auth", async (req, res) => {
@@ -33,8 +42,7 @@ router.post("/migrate-auth", async (req, res) => {
 
     // Step 2: Update existing accounts with default password
     const defaultPassword = "TestPassword123!";
-    const saltRounds = 12;
-    const passwordHash = await bcrypt.hash(defaultPassword, saltRounds);
+    const passwordHash = simpleHash(defaultPassword);
 
     const updateResult = await pool.query(`
       UPDATE accounts 
@@ -110,7 +118,7 @@ router.post("/test-auth", async (req, res) => {
     }
 
     // Verify password
-    const passwordValid = await bcrypt.compare(password, account.password_hash);
+    const passwordValid = verifyPassword(password, account.password_hash);
 
     res.json({ 
       ok: passwordValid, 

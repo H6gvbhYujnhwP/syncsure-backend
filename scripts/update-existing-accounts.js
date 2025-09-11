@@ -1,5 +1,10 @@
-import bcrypt from "bcrypt";
 import { pool } from "../db.js";
+
+// Simple password hashing (for development - replace with proper hashing in production)
+const simpleHash = (password) => {
+  // Simple hash for development - NOT secure for production
+  return Buffer.from(password).toString('base64');
+};
 
 async function updateExistingAccounts() {
   try {
@@ -7,8 +12,7 @@ async function updateExistingAccounts() {
     
     // Hash the test password
     const testPassword = "TestPassword123!";
-    const saltRounds = 12;
-    const passwordHash = await bcrypt.hash(testPassword, saltRounds);
+    const passwordHash = simpleHash(testPassword);
     
     // Update the test account
     const result = await pool.query(`
