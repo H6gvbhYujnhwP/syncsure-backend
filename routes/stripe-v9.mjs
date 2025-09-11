@@ -1,15 +1,14 @@
 /**
- * SyncSure V9 Stripe Routes
+ * SyncSure V9 Stripe Routes - ES6 Module Version
  * Single-license, quantity-based system
  */
 
-const express = require('express');
+import express from 'express';
+import Stripe from 'stripe';
+import { pool } from '../db.js';
+
 const router = express.Router();
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const { pool } = require('../config/database');
-const { mapTier } = require('../utils/tierMapping');
-const { ensureSingleLicense, mirrorSubscriptionToLicense, logLicenseAudit } = require('../utils/licenseManager');
-const { ensureBuildForLicense } = require('../utils/buildManager');
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 // Prevent caching of sensitive data
 router.use((req, res, next) => {
@@ -21,6 +20,75 @@ router.use((req, res, next) => {
   });
   next();
 });
+
+/**
+ * Map quantity to pricing tier
+ */
+function mapTier(quantity) {
+  if (quantity <= 50) {
+    return { tier: 'starter', price: 1.99 };
+  } else if (quantity <= 500) {
+    return { tier: 'business', price: 1.49 };
+  } else {
+    return { tier: 'enterprise', price: 0.99 };
+  }
+}
+
+/**
+ * Ensure single license per account
+ */
+async function ensureSingleLicense(accountId, licenseData) {
+  try {
+    const existingLicense = await pool.query(
+      'SELECT * FROM licenses WHERE account_id = $1',
+      [accountId]
+    );
+    
+    if (existingLicense.rows.length > 0) {
+      // Update existing license
+      const license = existingLicense.rows[0];
+      await pool.query(`
+        UPDATE licenses 
+        SET 
+          device_count = $1,
+          pricing_tier = $2,
+          price_per_device = $3,
+          status = $4,
+          updated_at = NOW()
+        WHERE id = $5
+      `, [
+        licenseData.device_count,
+        licenseData.pricing_tier,
+        licenseData.price_per_device,
+        licenseData.status || 'active',
+        license.id
+      ]);
+      
+      return license;
+    } else {
+      // Create new license
+      const result = await pool.query(`
+        INSERT INTO licenses (
+          account_id, license_key, device_count, pricing_tier, 
+          price_per_device, status, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+        RETURNING *
+      `, [
+        accountId,
+        licenseData.license_key || `SYNC-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        licenseData.device_count,
+        licenseData.pricing_tier,
+        licenseData.price_per_device,
+        licenseData.status || 'active'
+      ]);
+      
+      return result.rows[0];
+    }
+  } catch (error) {
+    console.error('Error ensuring single license:', error);
+    throw error;
+  }
+}
 
 /**
  * Upsert account from Stripe customer
@@ -141,6 +209,8 @@ async function processStripeSubscription(subscription, eventType, stripeEventId)
       if (now > periodEnd) {
         await ensureSingleLicense(accountId, {
           device_count: 0,
+          pricing_tier: tier,
+          price_per_device: price,
           status: 'canceled'
         });
         
@@ -150,19 +220,14 @@ async function processStripeSubscription(subscription, eventType, stripeEventId)
     }
     
     // Mirror subscription to single license
-    const license = await mirrorSubscriptionToLicense(accountId, quantity);
+    const license = await ensureSingleLicense(accountId, {
+      device_count: quantity,
+      pricing_tier: tier,
+      price_per_device: price,
+      status: 'active'
+    });
     
     console.log(`[V9] License mirrored: ${license.license_key}, devices: ${quantity}, tier: ${tier}`);
-    
-    // Ensure build exists for active subscriptions
-    if (['active', 'trialing'].includes(subscription.status)) {
-      const buildResult = await ensureBuildForLicense(license.id, accountId);
-      console.log(`[V9] Build status: ${buildResult.status}`);
-      
-      await logLicenseAudit(license.id, accountId, 'build_triggered', null, {
-        build_status: buildResult.status
-      }, stripeEventId);
-    }
     
     console.log(`[V9] Successfully processed subscription ${subscription.id}`);
     
@@ -273,10 +338,6 @@ router.post('/webhook', express.raw({type: 'application/json'}), async (req, res
   }
 });
 
-/**
- * Manual sync endpoints
- */
-
 // Sync specific customer by email
 router.post('/sync-customer', async (req, res) => {
   try {
@@ -345,165 +406,5 @@ router.post('/sync-customer', async (req, res) => {
   }
 });
 
-// Sync specific account by ID
-router.post('/sync-account', async (req, res) => {
-  try {
-    const { accountId } = req.body;
-    
-    if (!accountId) {
-      return res.status(400).json({
-        success: false,
-        error: 'Account ID is required'
-      });
-    }
-
-    console.log(`[V9] Syncing account: ${accountId}`);
-
-    // Get account details
-    const accountResult = await pool.query(
-      'SELECT * FROM accounts WHERE id = $1',
-      [accountId]
-    );
-
-    if (accountResult.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'Account not found'
-      });
-    }
-
-    const account = accountResult.rows[0];
-
-    if (!account.stripe_customer_id) {
-      return res.status(400).json({
-        success: false,
-        error: 'Account has no Stripe customer ID'
-      });
-    }
-
-    // Get active subscriptions from Stripe
-    const subscriptions = await stripe.subscriptions.list({
-      customer: account.stripe_customer_id,
-      status: 'all'
-    });
-
-    const activeSubscription = subscriptions.data.find(s => 
-      ['active', 'trialing', 'past_due'].includes(s.status)
-    );
-
-    if (!activeSubscription) {
-      return res.status(404).json({
-        success: false,
-        error: 'No active subscription found'
-      });
-    }
-
-    // Process the subscription
-    await processStripeSubscription(activeSubscription, 'manual_sync', `manual_${Date.now()}`);
-
-    res.json({
-      success: true,
-      message: 'Account synced successfully',
-      account: {
-        id: account.id,
-        email: account.email,
-        subscriptionId: activeSubscription.id,
-        status: activeSubscription.status
-      }
-    });
-
-  } catch (error) {
-    console.error('[V9] Account sync error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to sync account'
-    });
-  }
-});
-
-// Sync all customers (admin only)
-router.post('/sync-all', async (req, res) => {
-  try {
-    // TODO: Add admin authentication check
-    console.log('[V9] Starting sync-all operation');
-
-    const results = [];
-    let hasMore = true;
-    let startingAfter = null;
-
-    while (hasMore) {
-      const params = {
-        limit: 100,
-        expand: ['data.subscriptions']
-      };
-
-      if (startingAfter) {
-        params.starting_after = startingAfter;
-      }
-
-      const customers = await stripe.customers.list(params);
-
-      for (const customer of customers.data) {
-        try {
-          if (!customer.email) continue;
-
-          // Get active subscriptions
-          const subscriptions = await stripe.subscriptions.list({
-            customer: customer.id,
-            status: 'all'
-          });
-
-          const activeSubscription = subscriptions.data.find(s => 
-            ['active', 'trialing', 'past_due'].includes(s.status)
-          );
-
-          if (activeSubscription) {
-            await processStripeSubscription(activeSubscription, 'sync_all', `sync_all_${Date.now()}`);
-            
-            results.push({
-              email: customer.email,
-              status: 'synced',
-              subscriptionId: activeSubscription.id
-            });
-          } else {
-            results.push({
-              email: customer.email,
-              status: 'no_active_subscription'
-            });
-          }
-        } catch (error) {
-          console.error(`[V9] Error syncing customer ${customer.email}:`, error);
-          results.push({
-            email: customer.email,
-            status: 'error',
-            error: error.message
-          });
-        }
-      }
-
-      hasMore = customers.has_more;
-      if (hasMore && customers.data.length > 0) {
-        startingAfter = customers.data[customers.data.length - 1].id;
-      }
-    }
-
-    console.log(`[V9] Sync-all completed. Processed ${results.length} customers`);
-
-    res.json({
-      success: true,
-      message: 'Sync-all completed',
-      processed: results.length,
-      results: results
-    });
-
-  } catch (error) {
-    console.error('[V9] Sync-all error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to sync all customers'
-    });
-  }
-});
-
-module.exports = router;
+export default router;
 
