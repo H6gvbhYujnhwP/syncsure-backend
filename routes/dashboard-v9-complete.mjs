@@ -19,7 +19,7 @@ router.get('/summary', async (req, res) => {
 
     // Get account
     const accountResult = await db.query(
-      'SELECT id, email, company_name, stripe_customer_id FROM accounts WHERE email = $1',
+      'SELECT id, email, name, stripe_customer_id FROM accounts WHERE email = $1',
       [email]
     );
 
@@ -84,7 +84,7 @@ router.get('/summary', async (req, res) => {
       account: {
         id: account.id,
         email: account.email,
-        company_name: account.company_name,
+        company_name: account.name,
         stripe_customer_id: account.stripe_customer_id
       },
       license: license,

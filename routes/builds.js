@@ -20,7 +20,7 @@ router.get("/customer/:email", async (req, res) => {
         b.created_at,
         b.updated_at,
         l.license_key,
-        l.max_devices
+        l.device_count
       from builds b
       join licenses l on l.id = b.license_id
       join accounts a on a.id = l.account_id

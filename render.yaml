@@ -1,55 +1,14 @@
 services:
   - type: web
-    name: syncsure-backend
+    name: syncsure-backend-v9
     env: node
-    plan: standard
+    plan: starter
     buildCommand: npm install
     startCommand: npm start
-    autoDeploy: true
     envVars:
-      - key: DATABASE_URL
-        sync: false
+      - key: NODE_ENV
+        value: production
       - key: DATABASE_SSL
-        value: "true"
-      - key: SESSION_SECRET
-        sync: false
-      - key: FRONTEND_ORIGIN
-        sync: false
-      - key: STRIPE_SECRET_KEY
-        sync: false
-      - key: STRIPE_WEBHOOK_SECRET
-        sync: false
-      - key: GITHUB_OWNER
-        value: "H6gvbhYujnhwP"
-      - key: GITHUB_REPO
-        value: "Syncsure_Tool"
-      - key: GITHUB_PAT
-        sync: false
-      - key: RENDER_BASE
-        sync: false
-      - key: RESEND_API_KEY
-        sync: false
-
-  - type: worker
-    name: syncsure-worker
-    env: node
-    plan: standard
-    buildCommand: npm install
-    startCommand: npm run worker
-    autoDeploy: true
-    envVars:
-      - key: DATABASE_URL
-        sync: false
-      - key: DATABASE_SSL
-        value: "true"
-      - key: STRIPE_SECRET_KEY
-        sync: false
-      - key: GITHUB_OWNER
-        value: "H6gvbhYujnhwP"
-      - key: GITHUB_REPO
-        value: "Syncsure_Tool"
-      - key: GITHUB_PAT
-        sync: false
-      - key: RESEND_API_KEY
-        sync: false
-
+        value: true
+      - key: PGSSLMODE
+        value: require
