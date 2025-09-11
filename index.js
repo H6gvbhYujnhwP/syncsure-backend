@@ -18,8 +18,8 @@ import buildsRouter from "./routes/builds.js";
 import adminRouter from "./routes/admin.js";
 import agentRouter from "./routes/agent.js";
 
-// V9 Specific Routes (ES6 modules) - Debug Version
-import stripeV9Router from './routes/stripe-v9-debug.mjs';
+// V9 Specific Routes (ES6 modules)
+import stripeV9Router from './routes/stripe-v9.mjs';
 import dashboardV9Router from './routes/dashboard-v9.mjs';
 
 // Legacy routes for backward compatibility

@@ -359,6 +359,7 @@ router.post('/sync-customer', async (req, res) => {
     });
 
     if (customers.data.length === 0) {
+      console.log(`[V9] Customer not found in Stripe: ${email}`);
       return res.status(404).json({
         success: false,
         error: 'Customer not found in Stripe'
@@ -366,6 +367,7 @@ router.post('/sync-customer', async (req, res) => {
     }
 
     const customer = customers.data[0];
+    console.log(`[V9] Customer found: ${customer.email} (${customer.id})`);
 
     // Get active subscriptions
     const subscriptions = await stripe.subscriptions.list({
@@ -373,19 +375,26 @@ router.post('/sync-customer', async (req, res) => {
       status: 'all'
     });
 
+    console.log(`[V9] Found ${subscriptions.data.length} subscriptions`);
+
     const activeSubscription = subscriptions.data.find(s => 
       ['active', 'trialing', 'past_due'].includes(s.status)
     );
 
     if (!activeSubscription) {
+      console.log(`[V9] No active subscription found for ${email}`);
       return res.status(404).json({
         success: false,
         error: 'No active subscription found'
       });
     }
 
+    console.log(`[V9] Active subscription: ${activeSubscription.id} (${activeSubscription.status})`);
+
     // Process the subscription (same logic as webhook)
     await processStripeSubscription(activeSubscription, 'manual_sync', `manual_${Date.now()}`);
+
+    console.log(`[V9] Successfully synced customer: ${email}`);
 
     res.json({
       success: true,
@@ -393,15 +402,18 @@ router.post('/sync-customer', async (req, res) => {
       customer: {
         email: customer.email,
         subscriptionId: activeSubscription.id,
-        status: activeSubscription.status
+        status: activeSubscription.status,
+        quantity: activeSubscription.items.data[0]?.quantity || 1
       }
     });
 
   } catch (error) {
-    console.error('[V9] Customer sync error:', error);
+    console.error('[V9] Customer sync error:', error.message);
+    console.error('[V9] Stack trace:', error.stack);
     res.status(500).json({
       success: false,
-      error: 'Failed to sync customer'
+      error: 'Failed to sync customer',
+      details: error.message
     });
   }
 });
