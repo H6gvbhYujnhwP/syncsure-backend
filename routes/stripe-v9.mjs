@@ -53,8 +53,7 @@ async function ensureSingleLicense(accountId, licenseData) {
           device_count = $1,
           pricing_tier = $2,
           price_per_device = $3,
-          status = $4,
-          updated_at = NOW()
+          status = $4
         WHERE id = $5
       `, [
         licenseData.device_count,
@@ -70,8 +69,8 @@ async function ensureSingleLicense(accountId, licenseData) {
       const result = await pool.query(`
         INSERT INTO licenses (
           account_id, license_key, device_count, pricing_tier, 
-          price_per_device, status, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+          price_per_device, status, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
         RETURNING *
       `, [
         accountId,
@@ -104,15 +103,15 @@ async function upsertAccount(customer) {
       const account = existingAccount.rows[0];
       await pool.query(`
         UPDATE accounts 
-        SET stripe_customer_id = $1, email = $2, name = $3, updated_at = NOW()
+        SET stripe_customer_id = $1, email = $2, name = $3
         WHERE id = $4
       `, [customer.id, customer.email, customer.name || customer.email, account.id]);
       
       return account.id;
     } else {
       const result = await pool.query(`
-        INSERT INTO accounts (stripe_customer_id, email, name, created_at, updated_at)
-        VALUES ($1, $2, $3, NOW(), NOW())
+        INSERT INTO accounts (stripe_customer_id, email, name, created_at)
+        VALUES ($1, $2, $3, NOW())
         RETURNING id
       `, [customer.id, customer.email, customer.name || customer.email]);
       
@@ -142,8 +141,7 @@ async function upsertSubscription(accountId, subscriptionData) {
           stripe_subscription_id = $1,
           status = $2,
           device_quantity = $3,
-          current_period_end = $4,
-          updated_at = NOW()
+          current_period_end = $4
         WHERE id = $5
       `, [
         subscriptionData.stripe_subscription_id,
@@ -158,8 +156,8 @@ async function upsertSubscription(accountId, subscriptionData) {
       const result = await pool.query(`
         INSERT INTO subscriptions (
           account_id, stripe_subscription_id, status, device_quantity, 
-          current_period_end, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+          current_period_end, created_at
+        ) VALUES ($1, $2, $3, $4, $5, NOW())
         RETURNING id
       `, [
         accountId,
