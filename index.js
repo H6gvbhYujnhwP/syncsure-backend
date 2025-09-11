@@ -20,7 +20,7 @@ import agentRouter from "./routes/agent.js";
 
 // V9 Specific Routes (ES6 modules)
 import stripeV9Router from './routes/stripe-v9.mjs';
-import dashboardV9Router from './routes/dashboard-v9.mjs';
+import dashboardV9Router from './routes/dashboard-v9-complete.mjs';
 
 // Legacy routes for backward compatibility
 import stripeRouter, { stripeRaw } from "./routes/stripe.js";
