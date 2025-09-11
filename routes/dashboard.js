@@ -1,5 +1,6 @@
 import express from "express";
 import { pool } from "../db.js";
+import { requireAuth, attachUserLicense, optionalAuth } from "../middleware/auth.js";
 
 const router = express.Router();
 
@@ -14,45 +15,10 @@ router.use((req, res, next) => {
 });
 
 // GET /api/dashboard/devices - Get devices for authenticated user
-router.get("/devices", async (req, res) => {
+router.get("/devices", requireAuth, attachUserLicense, async (req, res) => {
   try {
-    // For now, get license key from query param
-    // TODO: Replace with authenticated user's license lookup
-    const { licenseKey } = req.query;
-    
-    if (!licenseKey) {
-      return res.status(400).json({ 
-        success: false, 
-        error: "License key required" 
-      });
-    }
-
-    // Get license information
-    const licenseQuery = `
-      SELECT 
-        l.id,
-        l.license_key,
-        l.device_count,
-        l.bound_count,
-        l.pricing_tier,
-        l.last_sync,
-        l.status as license_status,
-        a.email as account_email
-      FROM licenses l
-      LEFT JOIN accounts a ON l.account_id = a.id
-      WHERE l.license_key = $1 AND l.status = 'active'
-    `;
-    
-    const licenseResult = await pool.query(licenseQuery, [licenseKey]);
-    
-    if (licenseResult.rows.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        error: "License not found or inactive" 
-      });
-    }
-
-    const license = licenseResult.rows[0];
+    // Use authenticated user's license (attached by middleware)
+    const license = req.license;
 
     // Get devices bound to this license
     const devicesQuery = `
@@ -88,8 +54,8 @@ router.get("/devices", async (req, res) => {
         bound_count: license.bound_count,
         active_devices: activeDevices,
         last_sync: license.last_sync,
-        status: license.license_status,
-        account_email: license.account_email
+        status: license.status,
+        account_email: req.user.email
       },
       devices: devicesResult.rows.map(device => ({
         device_id: device.device_id,
@@ -124,16 +90,10 @@ router.get("/devices", async (req, res) => {
 });
 
 // GET /api/dashboard/stats - Get dashboard statistics
-router.get("/stats", async (req, res) => {
+router.get("/stats", requireAuth, attachUserLicense, async (req, res) => {
   try {
-    const { licenseKey } = req.query;
-    
-    if (!licenseKey) {
-      return res.status(400).json({ 
-        success: false, 
-        error: "License key required" 
-      });
-    }
+    // Use authenticated user's license (attached by middleware)
+    const license = req.license;
 
     // Get license and device statistics
     const statsQuery = `
@@ -149,11 +109,11 @@ router.get("/stats", async (req, res) => {
         MAX(db.last_heartbeat) as latest_heartbeat
       FROM licenses l
       LEFT JOIN device_bindings db ON l.id = db.license_id
-      WHERE l.license_key = $1 AND l.status = 'active'
+      WHERE l.id = $1 AND l.status = 'active'
       GROUP BY l.id, l.license_key, l.device_count, l.pricing_tier, l.bound_count, l.last_sync
     `;
     
-    const statsResult = await pool.query(statsQuery, [licenseKey]);
+    const statsResult = await pool.query(statsQuery, [license.id]);
     
     if (statsResult.rows.length === 0) {
       return res.status(404).json({ 

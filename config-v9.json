@@ -1,0 +1,28 @@
+{
+  "version": "9.0.0",
+  "system": "single-license-quantity-based",
+  "features": {
+    "singleLicensePerAccount": true,
+    "quantityBasedPricing": true,
+    "selfHealingDashboard": true,
+    "stripeSync": true,
+    "auditLogging": true
+  },
+  "pricing": {
+    "starter": {
+      "minDevices": 1,
+      "maxDevices": 50,
+      "pricePerDevice": 1.99
+    },
+    "business": {
+      "minDevices": 51,
+      "maxDevices": 500,
+      "pricePerDevice": 1.49
+    },
+    "enterprise": {
+      "minDevices": 501,
+      "maxDevices": null,
+      "pricePerDevice": 0.99
+    }
+  }
+}

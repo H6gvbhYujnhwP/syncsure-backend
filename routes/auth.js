@@ -2,6 +2,7 @@ import express from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { pool } from "../db.js";
+import { createSession, invalidateSession } from "../middleware/auth.js";
 
 const router = express.Router();
 
@@ -179,6 +180,120 @@ router.post("/login", async (req, res) => {
     res.status(500).json({ 
       ok: false, 
       error: "Internal server error during login" 
+    });
+  }
+});
+
+// Session-based login endpoint for dashboard
+router.post("/login-session", async (req, res) => {
+  const { email, password } = req.body || {};
+
+  // Validation
+  if (!email || !password) {
+    return res.status(400).json({ 
+      success: false, 
+      error: "Email and password are required" 
+    });
+  }
+
+  try {
+    // Get account with password hash
+    const account = await pool.query(
+      "SELECT id, email, password_hash, name, status, subscription_status FROM accounts WHERE email = $1",
+      [email]
+    );
+
+    if (account.rows.length === 0) {
+      return res.status(401).json({ 
+        success: false, 
+        error: "Invalid email or password" 
+      });
+    }
+
+    const accountData = account.rows[0];
+
+    // Check if account is active
+    if (accountData.status !== 'active') {
+      return res.status(403).json({ 
+        success: false, 
+        error: "Account is not active" 
+      });
+    }
+
+    // Check if password hash exists
+    if (!accountData.password_hash) {
+      return res.status(401).json({ 
+        success: false, 
+        error: "Account needs password setup. Please contact support." 
+      });
+    }
+
+    // Verify password
+    const passwordValid = await bcrypt.compare(password, accountData.password_hash);
+
+    if (!passwordValid) {
+      return res.status(401).json({ 
+        success: false, 
+        error: "Invalid email or password" 
+      });
+    }
+
+    // Create session
+    const userAgent = req.headers['user-agent'] || '';
+    const ipAddress = req.ip || req.connection.remoteAddress || '';
+    
+    const session = await createSession(accountData.id, userAgent, ipAddress);
+
+    // Set session cookie
+    res.cookie('session_id', session.sessionId, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
+    });
+
+    res.json({
+      success: true,
+      message: "Login successful",
+      user: {
+        id: accountData.id,
+        email: accountData.email,
+        name: accountData.name,
+        subscriptionStatus: accountData.subscription_status
+      },
+      sessionId: session.sessionId
+    });
+
+  } catch (error) {
+    console.error("Session login error:", error);
+    res.status(500).json({ 
+      success: false, 
+      error: "Internal server error during login" 
+    });
+  }
+});
+
+// Session logout endpoint
+router.post("/logout", async (req, res) => {
+  try {
+    const sessionId = req.cookies?.session_id;
+    
+    if (sessionId) {
+      await invalidateSession(sessionId);
+    }
+    
+    // Clear session cookie
+    res.clearCookie('session_id');
+    
+    res.json({
+      success: true,
+      message: "Logout successful"
+    });
+  } catch (error) {
+    console.error("Logout error:", error);
+    res.status(500).json({ 
+      success: false, 
+      error: "Internal server error during logout" 
     });
   }
 });
