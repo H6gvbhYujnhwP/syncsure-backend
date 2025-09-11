@@ -18,9 +18,9 @@ import buildsRouter from "./routes/builds.js";
 import adminRouter from "./routes/admin.js";
 import agentRouter from "./routes/agent.js";
 
-// V9 Specific Routes (ES6 modules)
-import stripeV9Router from './routes/stripe-v9.mjs';
-import dashboardV9Router from './routes/dashboard-v9-complete.mjs';
+// V9 Specific Routes (CommonJS modules)
+import stripeV9Router from './routes/stripe-v9.js';
+import dashboardV9Router from './routes/dashboard-v9.js';
 
 // Legacy routes for backward compatibility
 import stripeRouter, { stripeRaw } from "./routes/stripe.js";
